@@ -1,0 +1,737 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, query, orderBy, updateDoc, writeBatch } from 'firebase/firestore';
+import { getAuth, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
+import { Trash2, Edit, PlusCircle, X, AlertTriangle, Bell, ShieldCheck, LogOut, UserCircle, Filter, Search, ClipboardList, Package, ArrowDown, ArrowUp, Mail, Lock, UserPlus, LogIn } from 'lucide-react';
+
+// --- Configuração do Firebase ---
+const firebaseConfig = {
+  apiKey: "AIzaSyBdjJo5vLl-GqZuqn4Fzp0MRv0qmanaz7A",
+  authDomain: "vetcontrol-3031f.firebaseapp.com",
+  projectId: "vetcontrol-3031f",
+  storageBucket: "vetcontrol-3031f.appspot.com",
+  messagingSenderId: "244279756437",
+  appId: "1:244279756437:web:d26d54d425d7d516d8fd9c",
+  measurementId: "G-62XN9HR89Y"
+};
+const appId = "vetcontrol-3031f"; // Using projectId as a unique app identifier
+
+// --- Inicialização do Firebase ---
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// --- Constantes e Helpers ---
+const antiParasiteProducts = {
+    "Bravecto": 90,
+    "Simparic": 35,
+    "Defenza": 35,
+    "Outro": 30,
+};
+const vaccineTypes = {
+    v10: 'Vacina V10',
+    v5: 'Vacina V5',
+    rabies: 'Vacina Raiva',
+    giardia: 'Vacina Giardia',
+    gripe: 'Vacina Gripe',
+};
+const dewormerCycleDays = 120;
+const dewormerBoosterDays = 15;
+
+const formatDate = (dateString) => {
+    if (!dateString) return 'N/A';
+    const date = new Date(dateString);
+    return new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC' }).format(date);
+};
+
+const addDays = (dateString, days) => {
+    if (!dateString) return null;
+    const date = new Date(dateString);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().split('T')[0];
+};
+
+// --- Componentes da UI ---
+
+const Modal = ({ children, isOpen, onClose, size = 'lg' }) => {
+    if (!isOpen) return null;
+    const sizeClass = { lg: 'max-w-lg', '2xl': 'max-w-2xl', '4xl': 'max-w-4xl' }[size];
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-70 z-50 flex justify-center items-center p-4">
+            <div className={`bg-gray-800 rounded-2xl shadow-2xl w-full ${sizeClass} max-h-[90vh] flex flex-col p-6 relative animate-fade-in-up`}>
+                <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors z-10"><X size={24} /></button>
+                <div className="overflow-y-auto pr-2">{children}</div>
+            </div>
+        </div>
+    );
+};
+
+const PetForm = ({ petToEdit, onSave, onClose }) => {
+    const [pet, setPet] = useState({
+        id: petToEdit?.id || `pet_${new Date().getTime()}`,
+        name: petToEdit?.name || '', species: petToEdit?.species || 'Cão', breed: petToEdit?.breed || '',
+        dob: petToEdit?.dob || '', ownerName: petToEdit?.ownerName || '', ownerContact: petToEdit?.ownerContact || '',
+        observations: petToEdit?.observations || '', healthRecord: petToEdit?.healthRecord || {},
+    });
+
+    const handleChange = (e) => setPet(prev => ({ ...prev, [e.target.name]: e.target.value }));
+    const handleSubmit = (e) => { e.preventDefault(); onSave(pet); onClose(); };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <h2 className="text-2xl font-bold text-cyan-400">{petToEdit ? 'Editar Pet' : 'Adicionar Novo Pet'}</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <input type="text" name="name" value={pet.name} onChange={handleChange} placeholder="Nome do Pet" className="input-style" required />
+                <select name="species" value={pet.species} onChange={handleChange} className="input-style"><option>Cão</option><option>Gato</option></select>
+                <input type="text" name="breed" value={pet.breed} onChange={handleChange} placeholder="Raça" className="input-style" />
+                <div><label className="text-sm text-gray-400">Data de Nascimento</label><input type="date" name="dob" value={pet.dob} onChange={handleChange} className="input-style w-full" /></div>
+            </div>
+            <textarea name="observations" value={pet.observations} onChange={handleChange} placeholder="Observações (alergias, comportamento, etc.)" className="input-style w-full min-h-[80px] mt-4"></textarea>
+            <h3 className="text-xl font-semibold text-cyan-300 pt-4 border-t border-gray-700">Informações do Tutor</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <input type="text" name="ownerName" value={pet.ownerName} onChange={handleChange} placeholder="Nome do Tutor" className="input-style" />
+                <input type="text" name="ownerContact" value={pet.ownerContact} onChange={handleChange} placeholder="Contato (WhatsApp)" className="input-style" />
+            </div>
+            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar</button></div>
+        </form>
+    );
+};
+
+const HealthControlForm = ({ pet, onSave, onClose, depleteStockByName }) => {
+    const [initialHealthRecord] = useState(pet.healthRecord || {});
+    const [healthRecord, setHealthRecord] = useState(pet.healthRecord || {});
+
+    const handleChange = (e) => setHealthRecord(prev => ({ ...prev, [e.target.name]: e.target.value }));
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        const depletionTasks = [];
+
+        for (const [key, name] of Object.entries(vaccineTypes)) {
+            if (healthRecord[`last_${key}`] && healthRecord[`last_${key}`] !== initialHealthRecord[`last_${key}`]) {
+                depletionTasks.push(depleteStockByName(name, 1));
+            }
+        }
+        
+        if (healthRecord.lastAntiParasite && healthRecord.lastAntiParasite !== initialHealthRecord.lastAntiParasite) {
+            const productName = healthRecord.antiParasiteProduct === 'Outro' 
+                ? healthRecord.customAntiParasiteName 
+                : healthRecord.antiParasiteProduct;
+            if (productName) {
+                depletionTasks.push(depleteStockByName(productName, 1));
+            }
+        }
+
+        await onSave({ ...pet, healthRecord });
+        
+        if(depletionTasks.length > 0) {
+            await Promise.all(depletionTasks);
+            console.log(`${depletionTasks.length} item(s) removido(s) do estoque.`);
+        }
+        
+        onClose();
+    };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-6">
+            <h2 className="text-2xl font-bold text-cyan-400">Controle de Saúde de {pet.name}</h2>
+            <div>
+                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Vacinas (Última Aplicação)</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {Object.entries(vaccineTypes).map(([key, label]) => (
+                        <div key={key}>
+                            <label className="text-sm text-gray-400">{label}</label>
+                            <input type="date" name={`last_${key}`} value={healthRecord[`last_${key}`] || ''} onChange={handleChange} className="input-style w-full" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+            <div className="border-t border-gray-700 pt-4">
+                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Controle Antiparasitário</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <select name="antiParasiteProduct" value={healthRecord.antiParasiteProduct || ''} onChange={handleChange} className="input-style">
+                        <option value="">Selecione o Produto</option>
+                        {Object.keys(antiParasiteProducts).map(prod => <option key={prod} value={prod}>{prod}</option>)}
+                    </select>
+                    <div>
+                        <label className="text-sm text-gray-400">Data de Aplicação</label>
+                        <input type="date" name="lastAntiParasite" value={healthRecord.lastAntiParasite || ''} onChange={handleChange} className="input-style w-full" />
+                    </div>
+                </div>
+                {healthRecord.antiParasiteProduct === 'Outro' && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 bg-gray-700/50 p-4 rounded-lg">
+                        <input type="text" name="customAntiParasiteName" value={healthRecord.customAntiParasiteName || ''} onChange={handleChange} placeholder="Nome do produto" className="input-style" />
+                        <div><label className="text-sm text-gray-400">Duração (dias)</label><input type="number" name="customAntiParasiteDuration" value={healthRecord.customAntiParasiteDuration || ''} onChange={handleChange} placeholder="Ex: 45" className="input-style w-full"/></div>
+                    </div>
+                )}
+            </div>
+            <div className="border-t border-gray-700 pt-4">
+                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Controle de Vermífugo</h3>
+                <div><label className="text-sm text-gray-400">Data da 1ª Dose</label><input type="date" name="lastDewormerDose1" value={healthRecord.lastDewormerDose1 || ''} onChange={handleChange} className="input-style w-full"/></div>
+            </div>
+            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar Registros</button></div>
+        </form>
+    );
+};
+const Dashboard = ({ pets, onSelectPet }) => {
+    const [vaccineFilter, setVaccineFilter] = useState('all');
+
+    const alerts = useMemo(() => {
+        const today = new Date(); today.setHours(0, 0, 0, 0);
+        const overdue = [], dueSoon = [], dewormerBooster = [];
+        pets.forEach(pet => {
+            const hr = pet.healthRecord || {};
+            Object.entries(vaccineTypes).forEach(([key, label]) => {
+                if (vaccineFilter !== 'all' && vaccineFilter !== key) return;
+                const nextDateStr = addDays(hr[`last_${key}`], 365);
+                if (!nextDateStr) return;
+                const nextDate = new Date(nextDateStr + 'T00:00:00');
+                const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
+                if (daysDiff < 0) overdue.push({ pet, item: label, date: nextDateStr, daysOverdue: Math.abs(daysDiff) });
+                else if (daysDiff <= 15) dueSoon.push({ pet, item: label, date: nextDateStr });
+            });
+            if (vaccineFilter === 'all') {
+                if (hr.lastAntiParasite && hr.antiParasiteProduct) {
+                    const isCustom = hr.antiParasiteProduct === 'Outro';
+                    const duration = isCustom ? parseInt(hr.customAntiParasiteDuration, 10) || 30 : antiParasiteProducts[hr.antiParasiteProduct];
+                    const productName = isCustom ? hr.customAntiParasiteName || 'Outro' : hr.antiParasiteProduct;
+                    const nextDateStr = addDays(hr.lastAntiParasite, duration);
+                    if (nextDateStr) {
+                        const nextDate = new Date(nextDateStr + 'T00:00:00');
+                        const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
+                        const itemDescription = `Antipulgas (${productName})`;
+                        if (daysDiff < 0) overdue.push({ pet, item: itemDescription, date: nextDateStr, daysOverdue: Math.abs(daysDiff) });
+                        else if (daysDiff <= 15) dueSoon.push({ pet, item: itemDescription, date: nextDateStr });
+                    }
+                }
+                if (hr.lastDewormerDose1) {
+                    const nextCycleDateStr = addDays(hr.lastDewormerDose1, dewormerCycleDays);
+                    if(nextCycleDateStr) {
+                        const nextDate = new Date(nextCycleDateStr + 'T00:00:00');
+                        const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
+                        if (daysDiff < 0) overdue.push({ pet, item: 'Próximo Ciclo Vermífugo', date: nextCycleDateStr, daysOverdue: Math.abs(daysDiff) });
+                        else if (daysDiff <= 15) dueSoon.push({ pet, item: 'Próximo Ciclo Vermífugo', date: nextCycleDateStr });
+                    }
+                }
+            }
+            if (hr.lastDewormerDose1) {
+                const boosterDateStr = addDays(hr.lastDewormerDose1, dewormerBoosterDays);
+                const boosterDate = new Date(boosterDateStr + 'T00:00:00');
+                const daysDiff = Math.round((boosterDate - today) / (1000 * 3600 * 24));
+                if (daysDiff <= 5 && daysDiff >= -15) {
+                    const boosterItem = { pet, item: 'Reforço Vermífugo (2ª dose)', date: boosterDateStr };
+                    if (daysDiff < 0) boosterItem.daysOverdue = Math.abs(daysDiff);
+                    dewormerBooster.push(boosterItem);
+                }
+            }
+        });
+        const sortFn = (a, b) => new Date(a.date) - new Date(b.date);
+        return { overdue: overdue.sort(sortFn), dueSoon: dueSoon.sort(sortFn), dewormerBooster: dewormerBooster.sort(sortFn) };
+    }, [pets, vaccineFilter]);
+
+    const AlertCard = ({ title, icon, data, colorClass, onSelectPet }) => (
+        <div className={`bg-gray-800/80 backdrop-blur-sm rounded-xl p-4 md:p-6 shadow-lg border-l-4 ${colorClass}`}>
+            <h3 className="flex items-center text-xl font-bold mb-4 text-white">{icon}<span className="ml-2">{title}</span><span className={`ml-auto text-sm font-bold px-2 py-0.5 rounded-full ${colorClass.replace('border', 'bg')}-900`}>{data.length}</span></h3>
+            <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
+                {data.length > 0 ? data.map(({ pet, item, date, daysOverdue }, index) => (
+                    <div key={index} className="bg-gray-700/50 p-3 rounded-lg text-sm cursor-pointer hover:bg-gray-700 transition-colors" onClick={() => onSelectPet(pet, 'pets')}>
+                        <p className="font-bold text-cyan-400">{pet.name}</p>
+                        <p className="text-gray-300">{item}</p>
+                        {daysOverdue !== undefined ? (<div><p className="font-bold text-red-400">Vencido há {daysOverdue} {daysOverdue === 1 ? 'dia' : 'dias'}</p><p className="text-xs text-gray-400 mt-1">Data: {formatDate(date)}</p></div>) : (<p className="text-gray-400 font-medium">Vencimento: {formatDate(date)}</p>)}
+                    </div>
+                )) : <p className="text-gray-400 italic text-center py-4">Nenhum alerta.</p>}
+            </div>
+        </div>
+    );
+    
+    const FilterButton = ({ filterKey, label }) => {
+        const isActive = vaccineFilter === filterKey;
+        return (<button onClick={() => setVaccineFilter(filterKey)} className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-colors ${isActive ? 'bg-cyan-500 text-gray-900 shadow-md' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>{label}</button>);
+    };
+
+    return (
+        <div className="space-y-6">
+            <h2 className="text-3xl font-bold text-white">Dashboard de Alertas</h2>
+            <div className="bg-gray-800/80 p-4 rounded-xl">
+                 <h4 className="flex items-center text-lg font-semibold text-white mb-3"><Filter size={20} className="mr-2 text-cyan-400" />Filtrar Alertas de Vacinas</h4>
+                 <div className="flex flex-wrap gap-2">
+                     <FilterButton filterKey="all" label="Todas" />
+                     {Object.entries(vaccineTypes).map(([key, label]) => (<FilterButton key={key} filterKey={key} label={label.replace('Vacina ', '')} />))}
+                 </div>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+                 <AlertCard title="Alerta Crítico" icon={<AlertTriangle className="text-red-500" size={24} />} data={alerts.overdue} colorClass="border-red-500" onSelectPet={onSelectPet} />
+                 <AlertCard title="Atenção: Vencendo em 15 dias" icon={<Bell className="text-yellow-500" size={24} />} data={alerts.dueSoon} colorClass="border-yellow-500" onSelectPet={onSelectPet} />
+                 <AlertCard title="Reforço de Vermífugo Pendente" icon={<ShieldCheck className="text-blue-500" size={24} />} data={alerts.dewormerBooster} colorClass="border-blue-500" onSelectPet={onSelectPet} />
+            </div>
+        </div>
+    );
+};
+
+
+const PetList = ({ pets, onAddPet, onEditPet, onDeletePet, onManageHealth, onManageClinicalRecord }) => {
+    const [searchTerm, setSearchTerm] = useState('');
+    const filteredPets = useMemo(() => {
+        if (!searchTerm) return pets;
+        return pets.filter(pet => (pet.name && pet.name.toLowerCase().includes(searchTerm.toLowerCase())) || (pet.ownerName && pet.ownerName.toLowerCase().includes(searchTerm.toLowerCase())));
+    }, [pets, searchTerm]);
+
+    return (
+        <div>
+            <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
+                <h2 className="text-3xl font-bold text-white">Cadastro de Pets</h2>
+                <div className="w-full md:w-auto flex gap-4">
+                    <div className="relative w-full md:w-64"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="text" placeholder="Buscar Pet ou Tutor..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="input-style w-full pl-10"/></div>
+                    <button onClick={onAddPet} className="btn-primary flex-shrink-0 flex items-center gap-2"><PlusCircle size={20}/>Adicionar</button>
+                </div>
+            </div>
+            <div className="bg-gray-800/80 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden">
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                        <thead className="bg-gray-900/50"><tr><th className="p-4">Nome do Pet</th><th className="p-4">Tutor</th><th className="p-4 hidden md:table-cell">Espécie</th><th className="p-4 hidden lg:table-cell">Contato</th><th className="p-4 text-right">Ações</th></tr></thead>
+                        <tbody>
+                            {filteredPets.length > 0 ? filteredPets.map(pet => (
+                                <tr key={pet.id} className="border-b border-gray-700 hover:bg-gray-700/50 transition-colors">
+                                    <td className="p-4 font-medium text-cyan-400">{pet.name}</td><td className="p-4">{pet.ownerName}</td><td className="p-4 hidden md:table-cell">{pet.species}</td><td className="p-4 hidden lg:table-cell">{pet.ownerContact}</td>
+                                    <td className="p-4"><div className="flex justify-end items-center gap-2 md:gap-3">
+                                        <button onClick={() => onManageClinicalRecord(pet)} className="text-blue-400 hover:text-blue-300" title="Prontuário Clínico"><ClipboardList size={20}/></button>
+                                        <button onClick={() => onManageHealth(pet)} className="text-green-400 hover:text-green-300" title="Gerenciar Saúde Preventiva"><ShieldCheck size={20}/></button>
+                                        <button onClick={() => onEditPet(pet)} className="text-yellow-400 hover:text-yellow-300" title="Editar Pet"><Edit size={20}/></button>
+                                        <button onClick={() => onDeletePet(pet.id)} className="text-red-500 hover:text-red-400" title="Excluir Pet"><Trash2 size={20}/></button>
+                                    </div></td>
+                                </tr>
+                            )) : (<tr><td colSpan="5" className="text-center p-8 text-gray-400 italic">{searchTerm ? 'Nenhum resultado encontrado.' : 'Nenhum pet cadastrado ainda.'}</td></tr>)}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+const ClinicalRecordForm = ({ recordToEdit, onSave, onClose }) => {
+    const [record, setRecord] = useState(recordToEdit || { date: new Date().toISOString().split('T')[0], anamnesis: '', suspicion: '', diagnosis: '', treatment: '', examResults: '' });
+    const handleChange = (e) => setRecord(prev => ({ ...prev, [e.target.name]: e.target.value }));
+    const handleSubmit = (e) => { e.preventDefault(); onSave(record); };
+    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">{recordToEdit ? 'Editar Registro' : 'Novo Registro Clínico'}</h3><div><label className="text-sm text-gray-400">Data da Consulta</label><input type="date" name="date" value={record.date} onChange={handleChange} className="input-style w-full" required /></div><textarea name="anamnesis" value={record.anamnesis} onChange={handleChange} placeholder="Anamnese" className="input-style w-full min-h-[100px]"></textarea><textarea name="suspicion" value={record.suspicion} onChange={handleChange} placeholder="Suspeita Clínica" className="input-style w-full min-h-[100px]"></textarea><textarea name="diagnosis" value={record.diagnosis} onChange={handleChange} placeholder="Diagnóstico Definitivo" className="input-style w-full min-h-[100px]"></textarea><textarea name="treatment" value={record.treatment} onChange={handleChange} placeholder="Tratamento Prescrito" className="input-style w-full min-h-[100px]"></textarea><textarea name="examResults" value={record.examResults} onChange={handleChange} placeholder="Resultados de Exames" className="input-style w-full min-h-[100px]"></textarea><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar Registro</button></div></form>);
+};
+
+const ClinicalRecordModal = ({ pet, userId, onClose }) => {
+    const [records, setRecords] = useState([]);
+    const [isFormOpen, setIsFormOpen] = useState(false);
+    const [recordToEdit, setRecordToEdit] = useState(null);
+    useEffect(() => {
+        if (!userId || !pet) return;
+        const q = query(collection(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`), orderBy('date', 'desc'));
+        const unsubscribe = onSnapshot(q, (snapshot) => setRecords(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
+        return () => unsubscribe();
+    }, [userId, pet]);
+    const handleSaveRecord = async (recordData) => {
+        const recordId = recordToEdit?.id || `record_${new Date().getTime()}`;
+        const recordRef = doc(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`, recordId);
+        await setDoc(recordRef, { ...recordData, id: recordId }, { merge: true });
+        setIsFormOpen(false); setRecordToEdit(null);
+    };
+    const handleDeleteRecord = async (recordId) => {
+        if(window.confirm("Tem certeza que deseja excluir este registro clínico?")){
+            const recordRef = doc(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`, recordId);
+            await deleteDoc(recordRef);
+        }
+    };
+    const openFormToAdd = () => { setRecordToEdit(null); setIsFormOpen(true); };
+    const openFormToEdit = (record) => { setRecordToEdit(record); setIsFormOpen(true); };
+    const DetailSection = ({ label, content }) => (content ? (<div><h4 className="font-semibold text-cyan-400">{label}</h4><p className="text-gray-300 whitespace-pre-wrap">{content}</p></div>) : null);
+    return (<> <div className="space-y-6"><div className="flex justify-between items-center"><h2 className="text-3xl font-bold text-white">Prontuário de <span className="text-cyan-400">{pet.name}</span></h2><button onClick={openFormToAdd} className="btn-primary flex items-center gap-2"><PlusCircle size={20} /> Adicionar Registro</button></div><div className="space-y-4">{records.length > 0 ? (records.map(record => (<details key={record.id} className="bg-gray-700/50 rounded-lg p-4 cursor-pointer"><summary className="flex justify-between items-center font-semibold"><span>Consulta de {formatDate(record.date)}</span><div className="flex items-center gap-3"><button onClick={(e) => {e.preventDefault(); openFormToEdit(record)}} className="text-yellow-400 hover:text-yellow-300"><Edit size={18}/></button><button onClick={(e) => {e.preventDefault(); handleDeleteRecord(record.id)}} className="text-red-500 hover:text-red-400"><Trash2 size={18}/></button></div></summary><div className="mt-4 pt-4 border-t border-gray-600 space-y-3"><DetailSection label="Anamnese" content={record.anamnesis} /><DetailSection label="Suspeita Clínica" content={record.suspicion} /><DetailSection label="Diagnóstico" content={record.diagnosis} /><DetailSection label="Tratamento" content={record.treatment} /><DetailSection label="Exames" content={record.examResults} /></div></details>))) : (<p className="text-center text-gray-400 italic py-8">Nenhum registro clínico para este pet.</p>)}</div></div> <Modal isOpen={isFormOpen} onClose={() => setIsFormOpen(false)}><ClinicalRecordForm recordToEdit={recordToEdit} onSave={handleSaveRecord} onClose={() => setIsFormOpen(false)} /></Modal></>);
+};
+
+// --- Componentes de Estoque ---
+
+const useStock = (userId, setPermissionError) => {
+    const [products, setProducts] = useState([]);
+    const [isInitialized, setIsInitialized] = useState(false);
+    const stockCollectionPath = `artifacts/${appId}/users/${userId}/stock`;
+    
+    const initializeStock = async () => {
+        const batch = writeBatch(db);
+        const defaultProducts = [...Object.values(vaccineTypes), ...Object.keys(antiParasiteProducts).filter(p => p !== 'Outro')];
+        defaultProducts.forEach(name => {
+            const id = `prod_${name.replace(/\s+/g, '_').toLowerCase()}`;
+            const newProduct = { id, nome: name, unidade: 'Unidade', lotes: [] };
+            const productRef = doc(db, stockCollectionPath, id);
+            batch.set(productRef, newProduct, { merge: true });
+        });
+        await batch.commit();
+    };
+
+    useEffect(() => {
+        if (!userId) {
+            setProducts([]);
+            setIsInitialized(false);
+            return;
+        }
+        const q = query(collection(db, stockCollectionPath), orderBy('nome'));
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            setPermissionError(false);
+            const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            setProducts(productsData);
+            if (!isInitialized && snapshot.empty) {
+                initializeStock();
+                setIsInitialized(true);
+            } else if (!isInitialized) {
+                setIsInitialized(true);
+            }
+        }, (error) => {
+            if (error.code === 'permission-denied') {
+                setPermissionError(true);
+            }
+            console.error("Erro ao buscar estoque:", error);
+        });
+        return () => unsubscribe();
+    }, [userId, isInitialized, setPermissionError]);
+    
+    const addProduct = async (productData) => {
+        const id = `prod_${new Date().getTime()}`;
+        const firstLote = {
+            idLote: `lote_${new Date().getTime()}`,
+            quantidade: Number(productData.quantidadeInicial),
+            dataEntrada: new Date().toISOString().split('T')[0],
+            dataValidade: productData.dataValidade,
+        };
+        const newProduct = { id, nome: productData.nome, unidade: productData.unidade, lotes: [firstLote] };
+        await setDoc(doc(db, stockCollectionPath, id), newProduct);
+    };
+    
+    const updateProduct = async (productId, productData) => await updateDoc(doc(db, stockCollectionPath, productId), productData);
+    const deleteProduct = async (productId) => await deleteDoc(doc(db, stockCollectionPath, productId));
+
+    const registerEntry = async (productId, entryData) => {
+        const product = products.find(p => p.id === productId);
+        if (!product) return;
+        const newLote = { idLote: `lote_${new Date().getTime()}`, quantidade: Number(entryData.quantidade), dataEntrada: new Date().toISOString().split('T')[0], dataValidade: entryData.dataValidade };
+        await updateDoc(doc(db, stockCollectionPath, productId), { lotes: [...product.lotes, newLote] });
+    };
+
+    const registerExit = async (productId, quantityToExit) => {
+        const product = products.find(p => p.id === productId);
+        if (!product) return;
+        let remainingQty = Number(quantityToExit);
+        const sortedLotes = [...product.lotes].sort((a, b) => new Date(a.dataValidade) - new Date(b.dataValidade));
+        const updatedLotes = [];
+        for (const lote of sortedLotes) {
+            if (remainingQty <= 0) { updatedLotes.push(lote); continue; }
+            if (lote.quantidade >= remainingQty) {
+                updatedLotes.push({ ...lote, quantidade: lote.quantidade - remainingQty });
+                remainingQty = 0;
+            } else { remainingQty -= lote.quantidade; }
+        }
+        if (remainingQty > 0) { console.error("Estoque insuficiente."); return; }
+        await updateDoc(doc(db, stockCollectionPath, productId), { lotes: updatedLotes.filter(l => l.quantidade > 0) });
+    };
+    
+    const depleteStockByName = async (productName, quantity) => {
+        const product = products.find(p => p.nome.toLowerCase() === productName.toLowerCase());
+        if (product) {
+            await registerExit(product.id, quantity);
+        } else {
+            console.warn(`Produto "${productName}" não encontrado no estoque para dar baixa.`);
+        }
+    };
+
+    return { products, addProduct, updateProduct, deleteProduct, registerEntry, registerExit, depleteStockByName };
+};
+
+const ProductFormModal = ({ productToEdit, onSave, onClose }) => {
+    const isEditing = !!productToEdit;
+    const [product, setProduct] = useState(
+        isEditing
+        ? { nome: productToEdit.nome, unidade: productToEdit.unidade }
+        : { nome: '', unidade: 'Unidade', quantidadeInicial: '', dataValidade: '' }
+    );
+    
+    const handleChange = e => setProduct({...product, [e.target.name]: e.target.value});
+    const handleSubmit = e => { e.preventDefault(); onSave(product); onClose(); };
+
+    return (
+        <form onSubmit={handleSubmit} className="space-y-4">
+            <h3 className="text-2xl font-bold text-cyan-400">{isEditing ? 'Editar Produto' : 'Adicionar Novo Produto'}</h3>
+            <input name="nome" value={product.nome} onChange={handleChange} placeholder="Nome do Produto" className="input-style w-full" required />
+            <input name="unidade" value={product.unidade} onChange={handleChange} placeholder="Unidade (ex: Comprimido, mL)" className="input-style" />
+            {!isEditing && (
+                <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-700">
+                    <input type="number" name="quantidadeInicial" value={product.quantidadeInicial} onChange={handleChange} placeholder="Qtd. Inicial" className="input-style" required min="1"/>
+                    <div>
+                        <label className="text-sm text-gray-400">Validade do 1º Lote</label>
+                        <input type="date" name="dataValidade" value={product.dataValidade} onChange={handleChange} className="input-style w-full" required/>
+                    </div>
+                </div>
+            )}
+            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar</button></div>
+        </form>
+    );
+};
+
+const RegisterEntryModal = ({ products, onSave, onClose }) => {
+    const [entry, setEntry] = useState({ productId: '', quantidade: '', dataValidade: '' });
+    const handleChange = e => setEntry({...entry, [e.target.name]: e.target.value});
+    const handleSubmit = e => { e.preventDefault(); onSave(entry.productId, { quantidade: entry.quantidade, dataValidade: entry.dataValidade }); onClose(); };
+    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">Registrar Entrada de Lote</h3><select name="productId" value={entry.productId} onChange={handleChange} className="input-style w-full" required><option value="">-- Selecione um Produto --</option>{products.map(p => <option key={p.id} value={p.id}>{p.nome}</option>)}</select><div className="grid grid-cols-2 gap-4"><input type="number" name="quantidade" value={entry.quantidade} onChange={handleChange} placeholder="Quantidade" className="input-style" required min="1"/><div><label className="text-sm text-gray-400">Data de Validade</label><input type="date" name="dataValidade" value={entry.dataValidade} onChange={handleChange} className="input-style w-full" required/></div></div><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Registrar</button></div></form>);
+};
+
+const RegisterExitModal = ({ products, onSave, onClose }) => {
+    const [exit, setExit] = useState({ productId: '', quantidade: '' });
+    const handleChange = e => setExit({...exit, [e.target.name]: e.target.value});
+    const handleSubmit = e => { e.preventDefault(); onSave(exit.productId, exit.quantidade); onClose(); };
+    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">Registrar Saída de Produto</h3><select name="productId" value={exit.productId} onChange={handleChange} className="input-style w-full" required><option value="">-- Selecione um Produto --</option>{products.map(p => <option key={p.id} value={p.id}>{p.nome}</option>)}</select><input type="number" name="quantidade" value={exit.quantidade} onChange={handleChange} placeholder="Quantidade a retirar" className="input-style w-full" required min="1"/><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Registrar</button></div></form>);
+};
+
+const StockDashboard = ({ userId, setPermissionError }) => {
+    const { products, addProduct, updateProduct, deleteProduct, registerEntry, registerExit } = useStock(userId, setPermissionError);
+    const [modal, setModal] = useState({ type: null, data: null });
+    const [searchTerm, setSearchTerm] = useState('');
+    const [statusFilter, setStatusFilter] = useState('Todos');
+
+    const filteredProducts = useMemo(() => {
+        const today = new Date(); today.setHours(0,0,0,0);
+        const thirtyDaysFromNow = new Date(); thirtyDaysFromNow.setDate(today.getDate() + 30);
+        
+        const productsWithStatus = products.map(p => {
+            const totalQuantity = p.lotes.reduce((sum, lote) => sum + lote.quantidade, 0);
+            let status = { text: 'OK', color: 'bg-green-500' };
+            const hasExpired = p.lotes.some(l => new Date(l.dataValidade) < today);
+            const hasNearingExpiry = p.lotes.some(l => new Date(l.dataValidade) < thirtyDaysFromNow);
+            if (hasExpired) status = { text: 'VENCIDO', color: 'bg-red-500' };
+            else if (hasNearingExpiry) status = { text: 'VENC. PRÓXIMO', color: 'bg-orange-500' };
+            else if (totalQuantity < 20) status = { text: 'ESTOQUE BAIXO', color: 'bg-yellow-500' };
+            return { ...p, totalQuantity, status };
+        });
+
+        let filtered = productsWithStatus;
+        if (searchTerm) {
+            filtered = filtered.filter(p => p.nome.toLowerCase().includes(searchTerm.toLowerCase()));
+        }
+        if (statusFilter !== 'Todos') {
+            filtered = filtered.filter(p => p.status.text === statusFilter);
+        }
+        return filtered;
+    }, [products, searchTerm, statusFilter]);
+    
+    const StatusFilterButton = ({ filterValue, label }) => {
+        const isActive = statusFilter === filterValue;
+        return (<button onClick={() => setStatusFilter(filterValue)} className={`px-3 py-1.5 rounded-full text-xs sm:text-sm font-semibold transition-colors ${isActive ? 'bg-cyan-500 text-gray-900 shadow-md' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>{label}</button>);
+    };
+
+    return (
+        <div>
+            <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4"><h2 className="text-3xl font-bold text-white">Controle de Estoque</h2><div className="flex gap-2"><button onClick={() => setModal({type: 'add'})} className="btn-secondary flex items-center gap-2"><PlusCircle size={18}/> Novo Produto</button><button onClick={() => setModal({type: 'entry'})} className="btn-secondary flex items-center gap-2"><ArrowUp size={18}/> Entrada</button><button onClick={() => setModal({type: 'exit'})} className="btn-secondary flex items-center gap-2"><ArrowDown size={18}/> Saída</button></div></div>
+            
+            <div className="bg-gray-800/80 p-4 rounded-xl mb-6"><div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div><h4 className="flex items-center text-lg font-semibold text-white mb-3"><Search size={20} className="mr-2 text-cyan-400" />Buscar Produto</h4><input type="text" placeholder="Digite o nome do produto..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="input-style w-full"/></div>
+                <div><h4 className="flex items-center text-lg font-semibold text-white mb-3"><Filter size={20} className="mr-2 text-cyan-400" />Filtrar por Status</h4><div className="flex flex-wrap gap-2"><StatusFilterButton filterValue="Todos" label="Todos" /><StatusFilterButton filterValue="OK" label="OK" /><StatusFilterButton filterValue="ESTOQUE BAIXO" label="Estoque Baixo" /><StatusFilterButton filterValue="VENC. PRÓXIMO" label="Venc. Próximo" /><StatusFilterButton filterValue="VENCIDO" label="Vencido" /></div></div>
+            </div></div>
+
+            <div className="bg-gray-800/80 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden"><div className="overflow-x-auto">
+                <table className="w-full text-left">
+                    <thead className="bg-gray-900/50"><tr className="text-sm"><th className="p-4">PRODUTO</th><th className="p-4 text-center">QTD. TOTAL</th><th className="p-4">STATUS</th><th className="p-4">LOTES</th><th className="p-4">AÇÕES</th></tr></thead>
+                    <tbody>
+                        {filteredProducts.length > 0 ? filteredProducts.map(p => (
+                            <tr key={p.id} className="border-b border-gray-700 hover:bg-gray-700/50">
+                                <td className="p-4 font-medium text-cyan-400">{p.nome}<span className="block text-xs text-gray-400">{p.unidade}</span></td>
+                                <td className="p-4 text-center font-bold text-xl">{p.totalQuantity}</td>
+                                <td className="p-4"><span className={`px-2 py-1 text-xs font-bold text-white rounded-full ${p.status.color}`}>{p.status.text}</span></td>
+                                <td className="p-4 text-xs text-gray-400">{p.lotes.sort((a,b) => new Date(a.dataValidade) - new Date(b.dataValidade)).map(l => (<div key={l.idLote}>Qtd: {l.quantidade} / Val: {formatDate(l.dataValidade)}</div>))}</td>
+                                <td className="p-4"><div className="flex gap-3"><button onClick={() => setModal({type: 'edit', data: p})} className="text-yellow-400 hover:text-yellow-300"><Edit size={18}/></button><button onClick={() => window.confirm(`Deseja excluir "${p.nome}"?`) && deleteProduct(p.id)} className="text-red-500 hover:text-red-400"><Trash2 size={18}/></button></div></td>
+                            </tr>
+                        )) : (<tr><td colSpan="5" className="text-center p-8 text-gray-400 italic">Nenhum produto encontrado com os filtros atuais.</td></tr>)}
+                    </tbody>
+                </table>
+            </div></div>
+            <Modal isOpen={modal.type === 'add' || modal.type === 'edit'} onClose={() => setModal({type: null})}>
+                <ProductFormModal productToEdit={modal.type === 'edit' ? modal.data : null} onSave={(data) => modal.type === 'add' ? addProduct(data) : updateProduct(modal.data.id, data)} onClose={() => setModal({type: null})}/>
+            </Modal>
+            <Modal isOpen={modal.type === 'entry'} onClose={() => setModal({type: null})}><RegisterEntryModal products={products} onSave={registerEntry} onClose={() => setModal({type: null})} /></Modal>
+            <Modal isOpen={modal.type === 'exit'} onClose={() => setModal({type: null})}><RegisterExitModal products={products} onSave={registerExit} onClose={() => setModal({type: null})} /></Modal>
+        </div>
+    );
+};
+
+
+const Header = ({ user, onLogout }) => (
+    <header className="mb-8 flex justify-between items-center">
+        <div><h1 className="text-4xl font-extrabold text-white"><span className="text-cyan-400">Vet</span><span className="text-white">Control</span></h1><p className="text-gray-400 mt-1">Gestão de Saúde Preventiva para Pets</p></div>
+        {user && (<div className="flex items-center gap-4"><div className="text-right hidden sm:block"><p className="font-semibold text-white">{user.isAnonymous ? "Modo de Desenvolvimento" : (user.displayName || user.email)}</p>{user.isAnonymous && <p className="text-sm text-yellow-400">Sessão Temporária</p>}</div>{user.isAnonymous ? <UserCircle className="w-12 h-12 text-cyan-400"/> : (user.photoURL && <img src={user.photoURL} alt="User" className="w-12 h-12 rounded-full border-2 border-cyan-400" />)}<button onClick={onLogout} className="btn-secondary flex items-center gap-2"><LogOut size={18}/> Sair</button></div>)}
+    </header>
+);
+
+const LoginScreen = ({ onLogin, onSignUp }) => {
+    const [isLoginView, setIsLoginView] = useState(true);
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        setError('');
+        try {
+            if (isLoginView) await onLogin(email, password);
+            else await onSignUp(email, password);
+        } catch (err) {
+            switch(err.code) {
+                case 'auth/invalid-email': setError('Formato de e-mail inválido.'); break;
+                case 'auth/user-not-found': case 'auth/wrong-password': setError('E-mail ou senha incorretos.'); break;
+                case 'auth/email-already-in-use': setError('Este e-mail já está em uso.'); break;
+                 case 'auth/weak-password': setError('A senha deve ter pelo menos 6 caracteres.'); break;
+                default: setError('Ocorreu um erro. Tente novamente.'); break;
+            }
+        }
+    };
+
+    return (
+        <div className="flex flex-col items-center justify-center min-h-screen">
+            <div className="w-full max-w-md text-center p-8 bg-gray-800/80 rounded-2xl shadow-2xl backdrop-blur-sm">
+                <h1 className="text-5xl font-extrabold text-white mb-2"><span className="text-cyan-400">Vet</span><span className="text-white">Control</span></h1>
+                <p className="text-gray-400 mb-8">{isLoginView ? 'Acesse sua conta' : 'Crie uma nova conta'}</p>
+                <form onSubmit={handleSubmit} className="space-y-4">
+                    <div className="relative"><Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail" className="input-style w-full pl-10" required/></div>
+                    <div className="relative"><Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Senha" className="input-style w-full pl-10" required/></div>
+                    {error && <p className="text-red-500 text-sm text-center">{error}</p>}
+                    <button type="submit" className="w-full btn-primary flex items-center justify-center gap-2">{isLoginView ? <><LogIn size={20} /> Entrar</> : <><UserPlus size={20} /> Criar Conta</>}</button>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+const PermissionErrorDisplay = () => (
+    <div className="bg-red-900/50 border-l-4 border-red-500 text-red-200 p-6 rounded-lg max-w-4xl mx-auto mt-10">
+        <h3 className="flex items-center text-2xl font-bold mb-4"><AlertTriangle className="mr-3"/>Erro de Permissão do Firebase</h3>
+        <p className="mb-4">O aplicativo não conseguiu acessar os dados porque as regras de segurança do seu banco de dados Firebase Firestore estão bloqueando o acesso.</p>
+        <p className="mb-2">Para corrigir isso, por favor, siga estes passos:</p>
+        <ol className="list-decimal list-inside space-y-2 mb-4">
+            <li>Acesse o <a href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/rules`} target="_blank" rel="noopener noreferrer" className="font-bold underline hover:text-white">Console do Firebase</a> do seu projeto.</li>
+            <li>Vá para a seção <strong>Firestore Database</strong> e clique na aba <strong>"Regras"</strong> (ou "Rules").</li>
+            <li>Substitua todo o conteúdo do editor de regras pelo código abaixo e clique em <strong>"Publicar"</strong>.</li>
+        </ol>
+        <pre className="bg-gray-900 p-4 rounded-md text-sm text-white overflow-x-auto"><code>
+{`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /artifacts/{appId}/users/{userId}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+  }
+}`}
+        </code></pre>
+        <p className="mt-4 text-sm text-red-300">Após publicar as novas regras, por favor, atualize esta página.</p>
+    </div>
+);
+
+
+// --- Componente Principal ---
+export default function App() {
+    const [user, setUser] = useState(null);
+    const [userId, setUserId] = useState(null);
+    const [pets, setPets] = useState([]);
+    const [activeTab, setActiveTab] = useState('dashboard');
+    const [isPetModalOpen, setIsPetModalOpen] = useState(false);
+    const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
+    const [isClinicalRecordModalOpen, setIsClinicalRecordModalOpen] = useState(false);
+    const [selectedPet, setSelectedPet] = useState(null);
+    const [isAuthLoading, setIsAuthLoading] = useState(true);
+    const [permissionError, setPermissionError] = useState(false);
+    const { depleteStockByName } = useStock(userId, setPermissionError);
+
+    useEffect(() => {
+        const authUnsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+            setUser(firebaseUser); 
+            setUserId(firebaseUser ? firebaseUser.uid : null); 
+            setIsAuthLoading(false);
+        });
+        return () => authUnsubscribe();
+    }, []);
+    
+    useEffect(() => {
+        if (!userId) { setPets([]); return; }
+        const q = collection(db, `artifacts/${appId}/users/${userId}/pets`);
+        const unsubscribe = onSnapshot(q, (snapshot) => {
+            setPermissionError(false);
+            setPets(snapshot.docs.map(doc => doc.data()).sort((a, b) => a.name.localeCompare(b.name)));
+        }, (error) => {
+            if (error.code === 'permission-denied') {
+                setPermissionError(true);
+            }
+            console.error("Erro ao buscar pets:", error)
+        });
+        return () => unsubscribe();
+    }, [userId]);
+    
+    const handleLogin = (email, password) => signInWithEmailAndPassword(auth, email, password);
+    const handleSignUp = (email, password) => createUserWithEmailAndPassword(auth, email, password);
+    const handleLogout = async () => await signOut(auth).catch(e => console.error("Erro ao sair:", e));
+
+    const handleSavePet = async (petData) => {
+        if (!userId) return;
+        await setDoc(doc(db, `artifacts/${appId}/users/${userId}/pets`, petData.id), petData, { merge: true }).catch(e => console.error("Erro ao salvar pet:", e));
+    };
+    const handleDeletePet = async (petId) => {
+        if (!userId || !window.confirm("Deseja excluir este pet e todos os seus registros?")) return;
+        await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/pets`, petId)).catch(e => console.error("Erro ao excluir pet:", e));
+    };
+
+    const handleAddPetClick = () => { setSelectedPet(null); setIsPetModalOpen(true); };
+    const handleEditPetClick = (pet) => { setSelectedPet(pet); setIsPetModalOpen(true); };
+    const handleManageHealthClick = (pet) => { setSelectedPet(pet); setIsHealthModalOpen(true); };
+    const handleManageClinicalRecordClick = (pet) => { setSelectedPet(pet); setIsClinicalRecordModalOpen(true); };
+
+    const renderContent = () => {
+        if (permissionError) {
+            return <PermissionErrorDisplay />;
+        }
+        switch (activeTab) {
+            case 'dashboard': return <Dashboard pets={pets} onSelectPet={handleManageHealthClick} />;
+            case 'pets': return <PetList pets={pets} onAddPet={handleAddPetClick} onEditPet={handleEditPetClick} onDeletePet={handleDeletePet} onManageHealth={handleManageHealthClick} onManageClinicalRecord={handleManageClinicalRecordClick}/>;
+            case 'stock': return <StockDashboard userId={userId} setPermissionError={setPermissionError} />;
+            default: return null;
+        }
+    };
+
+    const TabButton = ({ tabName, label, icon: Icon }) => {
+        const isActive = activeTab === tabName;
+        return (<button onClick={() => setActiveTab(tabName)} className={`px-4 py-2 text-sm md:text-base font-semibold rounded-t-lg transition-all duration-300 flex items-center gap-2 ${isActive ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700/50 text-gray-300 hover:bg-gray-600/70'}`}><Icon size={18} /> {label}</button>);
+    };
+    
+    if (isAuthLoading) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white text-xl">Carregando...</div>;
+    
+    if (!user) return <LoginScreen onLogin={handleLogin} onSignUp={handleSignUp} />;
+
+    return (
+        <>
+            <style>{`
+                body { background-color: #111827; color: #e5e7eb; font-family: 'Inter', sans-serif; }
+                .input-style { background-color: #374151; border: 1px solid #4b5563; color: white; padding: 12px; border-radius: 8px; width: 100%; transition: border-color 0.2s, box-shadow 0.2s; }
+                .input-style:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.3); }
+                .btn-primary { background-color: #06b6d4; color: white; padding: 12px 20px; border-radius: 8px; font-weight: 600; transition: background-color 0.2s; border: none; }
+                .btn-primary:hover { background-color: #0891b2; }
+                .btn-secondary { background-color: #4b5563; color: white; padding: 10px 20px; border-radius: 8px; font-weight: 600; transition: background-color 0.2s; }
+                .btn-secondary:hover { background-color: #6b7280; }
+                @keyframes fade-in-up { 0% { opacity: 0; transform: translateY(20px); } 100% { opacity: 1; transform: translateY(0); } }
+                .animate-fade-in-up { animation: fade-in-up 0.3s ease-out forwards; }
+            `}</style>
+            <div className="min-h-screen bg-gray-900 text-gray-200 p-4 sm:p-6 lg:p-8">
+                <Header user={user} onLogout={handleLogout} />
+                <main>
+                    <div className="mb-4 border-b border-gray-700"><nav className="flex space-x-2">
+                       <TabButton tabName="dashboard" label="Dashboard" icon={Bell}/>
+                       <TabButton tabName="pets" label="Pets" icon={UserCircle}/>
+                       <TabButton tabName="stock" label="Estoque" icon={Package} />
+                    </nav></div>
+                    <div className="bg-gray-800/50 p-4 md:p-6 rounded-b-xl rounded-r-xl">{renderContent()}</div>
+                </main>
+                <footer className="text-center mt-12 text-gray-500 text-sm"><p>Desenvolvido para gestão veterinária simplificada.</p></footer>
+            </div>
+            
+            <Modal isOpen={isPetModalOpen} onClose={() => setIsPetModalOpen(false)}><PetForm petToEdit={selectedPet} onSave={handleSavePet} onClose={() => setIsPetModalOpen(false)} /></Modal>
+            {selectedPet && (<Modal isOpen={isHealthModalOpen} onClose={() => setIsHealthModalOpen(false)}><HealthControlForm pet={selectedPet} onSave={handleSavePet} onClose={() => setIsHealthModalOpen(false)} depleteStockByName={depleteStockByName} /></Modal>)}
+            {selectedPet && (<Modal isOpen={isClinicalRecordModalOpen} onClose={() => setIsClinicalRecordModalOpen(false)} size="4xl"><ClinicalRecordModal pet={selectedPet} userId={userId} onClose={() => setIsClinicalRecordModalOpen(false)} /></Modal>)}
+        </>
+    );
+}
