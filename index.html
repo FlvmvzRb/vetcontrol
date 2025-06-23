@@ -1,737 +1,452 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, setDoc, onSnapshot, deleteDoc, query, orderBy, updateDoc, writeBatch } from 'firebase/firestore';
-import { getAuth, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
-import { Trash2, Edit, PlusCircle, X, AlertTriangle, Bell, ShieldCheck, LogOut, UserCircle, Filter, Search, ClipboardList, Package, ArrowDown, ArrowUp, Mail, Lock, UserPlus, LogIn } from 'lucide-react';
-
-// --- Configuração do Firebase ---
-const firebaseConfig = {
-  apiKey: "AIzaSyBdjJo5vLl-GqZuqn4Fzp0MRv0qmanaz7A",
-  authDomain: "vetcontrol-3031f.firebaseapp.com",
-  projectId: "vetcontrol-3031f",
-  storageBucket: "vetcontrol-3031f.appspot.com",
-  messagingSenderId: "244279756437",
-  appId: "1:244279756437:web:d26d54d425d7d516d8fd9c",
-  measurementId: "G-62XN9HR89Y"
-};
-const appId = "vetcontrol-3031f"; // Using projectId as a unique app identifier
-
-// --- Inicialização do Firebase ---
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-const auth = getAuth(app);
-
-// --- Constantes e Helpers ---
-const antiParasiteProducts = {
-    "Bravecto": 90,
-    "Simparic": 35,
-    "Defenza": 35,
-    "Outro": 30,
-};
-const vaccineTypes = {
-    v10: 'Vacina V10',
-    v5: 'Vacina V5',
-    rabies: 'Vacina Raiva',
-    giardia: 'Vacina Giardia',
-    gripe: 'Vacina Gripe',
-};
-const dewormerCycleDays = 120;
-const dewormerBoosterDays = 15;
-
-const formatDate = (dateString) => {
-    if (!dateString) return 'N/A';
-    const date = new Date(dateString);
-    return new Intl.DateTimeFormat('pt-BR', { timeZone: 'UTC' }).format(date);
-};
-
-const addDays = (dateString, days) => {
-    if (!dateString) return null;
-    const date = new Date(dateString);
-    date.setUTCDate(date.getUTCDate() + days);
-    return date.toISOString().split('T')[0];
-};
-
-// --- Componentes da UI ---
-
-const Modal = ({ children, isOpen, onClose, size = 'lg' }) => {
-    if (!isOpen) return null;
-    const sizeClass = { lg: 'max-w-lg', '2xl': 'max-w-2xl', '4xl': 'max-w-4xl' }[size];
-    return (
-        <div className="fixed inset-0 bg-black bg-opacity-70 z-50 flex justify-center items-center p-4">
-            <div className={`bg-gray-800 rounded-2xl shadow-2xl w-full ${sizeClass} max-h-[90vh] flex flex-col p-6 relative animate-fade-in-up`}>
-                <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors z-10"><X size={24} /></button>
-                <div className="overflow-y-auto pr-2">{children}</div>
-            </div>
-        </div>
-    );
-};
-
-const PetForm = ({ petToEdit, onSave, onClose }) => {
-    const [pet, setPet] = useState({
-        id: petToEdit?.id || `pet_${new Date().getTime()}`,
-        name: petToEdit?.name || '', species: petToEdit?.species || 'Cão', breed: petToEdit?.breed || '',
-        dob: petToEdit?.dob || '', ownerName: petToEdit?.ownerName || '', ownerContact: petToEdit?.ownerContact || '',
-        observations: petToEdit?.observations || '', healthRecord: petToEdit?.healthRecord || {},
-    });
-
-    const handleChange = (e) => setPet(prev => ({ ...prev, [e.target.name]: e.target.value }));
-    const handleSubmit = (e) => { e.preventDefault(); onSave(pet); onClose(); };
-
-    return (
-        <form onSubmit={handleSubmit} className="space-y-4">
-            <h2 className="text-2xl font-bold text-cyan-400">{petToEdit ? 'Editar Pet' : 'Adicionar Novo Pet'}</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input type="text" name="name" value={pet.name} onChange={handleChange} placeholder="Nome do Pet" className="input-style" required />
-                <select name="species" value={pet.species} onChange={handleChange} className="input-style"><option>Cão</option><option>Gato</option></select>
-                <input type="text" name="breed" value={pet.breed} onChange={handleChange} placeholder="Raça" className="input-style" />
-                <div><label className="text-sm text-gray-400">Data de Nascimento</label><input type="date" name="dob" value={pet.dob} onChange={handleChange} className="input-style w-full" /></div>
-            </div>
-            <textarea name="observations" value={pet.observations} onChange={handleChange} placeholder="Observações (alergias, comportamento, etc.)" className="input-style w-full min-h-[80px] mt-4"></textarea>
-            <h3 className="text-xl font-semibold text-cyan-300 pt-4 border-t border-gray-700">Informações do Tutor</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <input type="text" name="ownerName" value={pet.ownerName} onChange={handleChange} placeholder="Nome do Tutor" className="input-style" />
-                <input type="text" name="ownerContact" value={pet.ownerContact} onChange={handleChange} placeholder="Contato (WhatsApp)" className="input-style" />
-            </div>
-            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar</button></div>
-        </form>
-    );
-};
-
-const HealthControlForm = ({ pet, onSave, onClose, depleteStockByName }) => {
-    const [initialHealthRecord] = useState(pet.healthRecord || {});
-    const [healthRecord, setHealthRecord] = useState(pet.healthRecord || {});
-
-    const handleChange = (e) => setHealthRecord(prev => ({ ...prev, [e.target.name]: e.target.value }));
-
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        const depletionTasks = [];
-
-        for (const [key, name] of Object.entries(vaccineTypes)) {
-            if (healthRecord[`last_${key}`] && healthRecord[`last_${key}`] !== initialHealthRecord[`last_${key}`]) {
-                depletionTasks.push(depleteStockByName(name, 1));
-            }
-        }
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Controle Veterinário</title>
+    <!-- Tailwind CSS para um design moderno e responsivo -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+    <style>
+        /* Estilos personalizados */
+        .modal-backdrop { background-color: rgba(0, 0, 0, 0.5); }
+        .modal { transition: all 0.3s ease-in-out; }
+        .hidden { display: none; }
+        .tab-button { transition: all 0.2s; padding: 8px 16px; border-radius: 8px; border: 1px solid transparent; font-weight: 500; text-align: center; }
+        .tab-button.active { background-color: #8b5cf6; color: white; box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06); }
+        .tab-button:not(.active):hover { background-color: #c4b5fd; }
+        .tab-content { animation: fadeIn 0.5s; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
         
-        if (healthRecord.lastAntiParasite && healthRecord.lastAntiParasite !== initialHealthRecord.lastAntiParasite) {
-            const productName = healthRecord.antiParasiteProduct === 'Outro' 
-                ? healthRecord.customAntiParasiteName 
-                : healthRecord.antiParasiteProduct;
-            if (productName) {
-                depletionTasks.push(depleteStockByName(productName, 1));
-            }
+        /* Estilos para Toast (Notificação) */
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 1rem 1.5rem;
+            border-radius: 0.5rem;
+            color: white;
+            opacity: 0;
+            transition: opacity 0.3s, transform 0.3s;
+            transform: translateX(100%);
+            z-index: 1000;
         }
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast.success { background-color: #22c55e; /* green-500 */ }
+        .toast.error { background-color: #ef4444; /* red-500 */ }
+        .toast.warning { background-color: #f97316; /* orange-500 */ }
+    </style>
+</head>
+<body class="bg-purple-100 font-sans">
 
-        await onSave({ ...pet, healthRecord });
-        
-        if(depletionTasks.length > 0) {
-            await Promise.all(depletionTasks);
-            console.log(`${depletionTasks.length} item(s) removido(s) do estoque.`);
-        }
-        
-        onClose();
-    };
+    <!-- ==== CONTAINER PARA TOASTS ==== -->
+    <div id="toast-container"></div>
 
-    return (
-        <form onSubmit={handleSubmit} className="space-y-6">
-            <h2 className="text-2xl font-bold text-cyan-400">Controle de Saúde de {pet.name}</h2>
-            <div>
-                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Vacinas (Última Aplicação)</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {Object.entries(vaccineTypes).map(([key, label]) => (
-                        <div key={key}>
-                            <label className="text-sm text-gray-400">{label}</label>
-                            <input type="date" name={`last_${key}`} value={healthRecord[`last_${key}`] || ''} onChange={handleChange} className="input-style w-full" />
-                        </div>
-                    ))}
-                </div>
-            </div>
-            <div className="border-t border-gray-700 pt-4">
-                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Controle Antiparasitário</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <select name="antiParasiteProduct" value={healthRecord.antiParasiteProduct || ''} onChange={handleChange} className="input-style">
-                        <option value="">Selecione o Produto</option>
-                        {Object.keys(antiParasiteProducts).map(prod => <option key={prod} value={prod}>{prod}</option>)}
-                    </select>
-                    <div>
-                        <label className="text-sm text-gray-400">Data de Aplicação</label>
-                        <input type="date" name="lastAntiParasite" value={healthRecord.lastAntiParasite || ''} onChange={handleChange} className="input-style w-full" />
-                    </div>
-                </div>
-                {healthRecord.antiParasiteProduct === 'Outro' && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 bg-gray-700/50 p-4 rounded-lg">
-                        <input type="text" name="customAntiParasiteName" value={healthRecord.customAntiParasiteName || ''} onChange={handleChange} placeholder="Nome do produto" className="input-style" />
-                        <div><label className="text-sm text-gray-400">Duração (dias)</label><input type="number" name="customAntiParasiteDuration" value={healthRecord.customAntiParasiteDuration || ''} onChange={handleChange} placeholder="Ex: 45" className="input-style w-full"/></div>
-                    </div>
-                )}
-            </div>
-            <div className="border-t border-gray-700 pt-4">
-                <h3 className="text-xl font-semibold text-cyan-300 mb-2">Controle de Vermífugo</h3>
-                <div><label className="text-sm text-gray-400">Data da 1ª Dose</label><input type="date" name="lastDewormerDose1" value={healthRecord.lastDewormerDose1 || ''} onChange={handleChange} className="input-style w-full"/></div>
-            </div>
-            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar Registros</button></div>
-        </form>
-    );
-};
-const Dashboard = ({ pets, onSelectPet }) => {
-    const [vaccineFilter, setVaccineFilter] = useState('all');
-
-    const alerts = useMemo(() => {
-        const today = new Date(); today.setHours(0, 0, 0, 0);
-        const overdue = [], dueSoon = [], dewormerBooster = [];
-        pets.forEach(pet => {
-            const hr = pet.healthRecord || {};
-            Object.entries(vaccineTypes).forEach(([key, label]) => {
-                if (vaccineFilter !== 'all' && vaccineFilter !== key) return;
-                const nextDateStr = addDays(hr[`last_${key}`], 365);
-                if (!nextDateStr) return;
-                const nextDate = new Date(nextDateStr + 'T00:00:00');
-                const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
-                if (daysDiff < 0) overdue.push({ pet, item: label, date: nextDateStr, daysOverdue: Math.abs(daysDiff) });
-                else if (daysDiff <= 15) dueSoon.push({ pet, item: label, date: nextDateStr });
-            });
-            if (vaccineFilter === 'all') {
-                if (hr.lastAntiParasite && hr.antiParasiteProduct) {
-                    const isCustom = hr.antiParasiteProduct === 'Outro';
-                    const duration = isCustom ? parseInt(hr.customAntiParasiteDuration, 10) || 30 : antiParasiteProducts[hr.antiParasiteProduct];
-                    const productName = isCustom ? hr.customAntiParasiteName || 'Outro' : hr.antiParasiteProduct;
-                    const nextDateStr = addDays(hr.lastAntiParasite, duration);
-                    if (nextDateStr) {
-                        const nextDate = new Date(nextDateStr + 'T00:00:00');
-                        const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
-                        const itemDescription = `Antipulgas (${productName})`;
-                        if (daysDiff < 0) overdue.push({ pet, item: itemDescription, date: nextDateStr, daysOverdue: Math.abs(daysDiff) });
-                        else if (daysDiff <= 15) dueSoon.push({ pet, item: itemDescription, date: nextDateStr });
-                    }
-                }
-                if (hr.lastDewormerDose1) {
-                    const nextCycleDateStr = addDays(hr.lastDewormerDose1, dewormerCycleDays);
-                    if(nextCycleDateStr) {
-                        const nextDate = new Date(nextCycleDateStr + 'T00:00:00');
-                        const daysDiff = Math.round((nextDate - today) / (1000 * 3600 * 24));
-                        if (daysDiff < 0) overdue.push({ pet, item: 'Próximo Ciclo Vermífugo', date: nextCycleDateStr, daysOverdue: Math.abs(daysDiff) });
-                        else if (daysDiff <= 15) dueSoon.push({ pet, item: 'Próximo Ciclo Vermífugo', date: nextCycleDateStr });
-                    }
-                }
-            }
-            if (hr.lastDewormerDose1) {
-                const boosterDateStr = addDays(hr.lastDewormerDose1, dewormerBoosterDays);
-                const boosterDate = new Date(boosterDateStr + 'T00:00:00');
-                const daysDiff = Math.round((boosterDate - today) / (1000 * 3600 * 24));
-                if (daysDiff <= 5 && daysDiff >= -15) {
-                    const boosterItem = { pet, item: 'Reforço Vermífugo (2ª dose)', date: boosterDateStr };
-                    if (daysDiff < 0) boosterItem.daysOverdue = Math.abs(daysDiff);
-                    dewormerBooster.push(boosterItem);
-                }
-            }
-        });
-        const sortFn = (a, b) => new Date(a.date) - new Date(b.date);
-        return { overdue: overdue.sort(sortFn), dueSoon: dueSoon.sort(sortFn), dewormerBooster: dewormerBooster.sort(sortFn) };
-    }, [pets, vaccineFilter]);
-
-    const AlertCard = ({ title, icon, data, colorClass, onSelectPet }) => (
-        <div className={`bg-gray-800/80 backdrop-blur-sm rounded-xl p-4 md:p-6 shadow-lg border-l-4 ${colorClass}`}>
-            <h3 className="flex items-center text-xl font-bold mb-4 text-white">{icon}<span className="ml-2">{title}</span><span className={`ml-auto text-sm font-bold px-2 py-0.5 rounded-full ${colorClass.replace('border', 'bg')}-900`}>{data.length}</span></h3>
-            <div className="space-y-3 max-h-60 overflow-y-auto pr-2">
-                {data.length > 0 ? data.map(({ pet, item, date, daysOverdue }, index) => (
-                    <div key={index} className="bg-gray-700/50 p-3 rounded-lg text-sm cursor-pointer hover:bg-gray-700 transition-colors" onClick={() => onSelectPet(pet, 'pets')}>
-                        <p className="font-bold text-cyan-400">{pet.name}</p>
-                        <p className="text-gray-300">{item}</p>
-                        {daysOverdue !== undefined ? (<div><p className="font-bold text-red-400">Vencido há {daysOverdue} {daysOverdue === 1 ? 'dia' : 'dias'}</p><p className="text-xs text-gray-400 mt-1">Data: {formatDate(date)}</p></div>) : (<p className="text-gray-400 font-medium">Vencimento: {formatDate(date)}</p>)}
-                    </div>
-                )) : <p className="text-gray-400 italic text-center py-4">Nenhum alerta.</p>}
-            </div>
+    <!-- ==== TELA DE LOGIN ==== -->
+    <div id="login-screen" class="min-h-screen flex items-center justify-center p-4">
+        <div class="bg-white p-8 rounded-lg shadow-md w-full max-w-md">
+            <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">Controle Veterinário</h1>
+            <p id="login-error" class="text-red-500 text-center mb-4 hidden"></p>
+            <form id="login-form">
+                <div class="mb-4"><label for="email" class="block text-gray-700 mb-2">Email</label><input type="email" id="email" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" required></div>
+                <div class="mb-6"><label for="password" class="block text-gray-700 mb-2">Senha</label><input type="password" id="password" class="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500" required></div>
+                <button type="submit" class="w-full bg-purple-600 text-white py-2 rounded-lg hover:bg-purple-700 transition-colors">Entrar</button>
+            </form>
         </div>
-    );
-    
-    const FilterButton = ({ filterKey, label }) => {
-        const isActive = vaccineFilter === filterKey;
-        return (<button onClick={() => setVaccineFilter(filterKey)} className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-colors ${isActive ? 'bg-cyan-500 text-gray-900 shadow-md' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>{label}</button>);
-    };
-
-    return (
-        <div className="space-y-6">
-            <h2 className="text-3xl font-bold text-white">Dashboard de Alertas</h2>
-            <div className="bg-gray-800/80 p-4 rounded-xl">
-                 <h4 className="flex items-center text-lg font-semibold text-white mb-3"><Filter size={20} className="mr-2 text-cyan-400" />Filtrar Alertas de Vacinas</h4>
-                 <div className="flex flex-wrap gap-2">
-                     <FilterButton filterKey="all" label="Todas" />
-                     {Object.entries(vaccineTypes).map(([key, label]) => (<FilterButton key={key} filterKey={key} label={label.replace('Vacina ', '')} />))}
-                 </div>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-                 <AlertCard title="Alerta Crítico" icon={<AlertTriangle className="text-red-500" size={24} />} data={alerts.overdue} colorClass="border-red-500" onSelectPet={onSelectPet} />
-                 <AlertCard title="Atenção: Vencendo em 15 dias" icon={<Bell className="text-yellow-500" size={24} />} data={alerts.dueSoon} colorClass="border-yellow-500" onSelectPet={onSelectPet} />
-                 <AlertCard title="Reforço de Vermífugo Pendente" icon={<ShieldCheck className="text-blue-500" size={24} />} data={alerts.dewormerBooster} colorClass="border-blue-500" onSelectPet={onSelectPet} />
-            </div>
-        </div>
-    );
-};
-
-
-const PetList = ({ pets, onAddPet, onEditPet, onDeletePet, onManageHealth, onManageClinicalRecord }) => {
-    const [searchTerm, setSearchTerm] = useState('');
-    const filteredPets = useMemo(() => {
-        if (!searchTerm) return pets;
-        return pets.filter(pet => (pet.name && pet.name.toLowerCase().includes(searchTerm.toLowerCase())) || (pet.ownerName && pet.ownerName.toLowerCase().includes(searchTerm.toLowerCase())));
-    }, [pets, searchTerm]);
-
-    return (
-        <div>
-            <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4">
-                <h2 className="text-3xl font-bold text-white">Cadastro de Pets</h2>
-                <div className="w-full md:w-auto flex gap-4">
-                    <div className="relative w-full md:w-64"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="text" placeholder="Buscar Pet ou Tutor..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="input-style w-full pl-10"/></div>
-                    <button onClick={onAddPet} className="btn-primary flex-shrink-0 flex items-center gap-2"><PlusCircle size={20}/>Adicionar</button>
-                </div>
-            </div>
-            <div className="bg-gray-800/80 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                        <thead className="bg-gray-900/50"><tr><th className="p-4">Nome do Pet</th><th className="p-4">Tutor</th><th className="p-4 hidden md:table-cell">Espécie</th><th className="p-4 hidden lg:table-cell">Contato</th><th className="p-4 text-right">Ações</th></tr></thead>
-                        <tbody>
-                            {filteredPets.length > 0 ? filteredPets.map(pet => (
-                                <tr key={pet.id} className="border-b border-gray-700 hover:bg-gray-700/50 transition-colors">
-                                    <td className="p-4 font-medium text-cyan-400">{pet.name}</td><td className="p-4">{pet.ownerName}</td><td className="p-4 hidden md:table-cell">{pet.species}</td><td className="p-4 hidden lg:table-cell">{pet.ownerContact}</td>
-                                    <td className="p-4"><div className="flex justify-end items-center gap-2 md:gap-3">
-                                        <button onClick={() => onManageClinicalRecord(pet)} className="text-blue-400 hover:text-blue-300" title="Prontuário Clínico"><ClipboardList size={20}/></button>
-                                        <button onClick={() => onManageHealth(pet)} className="text-green-400 hover:text-green-300" title="Gerenciar Saúde Preventiva"><ShieldCheck size={20}/></button>
-                                        <button onClick={() => onEditPet(pet)} className="text-yellow-400 hover:text-yellow-300" title="Editar Pet"><Edit size={20}/></button>
-                                        <button onClick={() => onDeletePet(pet.id)} className="text-red-500 hover:text-red-400" title="Excluir Pet"><Trash2 size={20}/></button>
-                                    </div></td>
-                                </tr>
-                            )) : (<tr><td colSpan="5" className="text-center p-8 text-gray-400 italic">{searchTerm ? 'Nenhum resultado encontrado.' : 'Nenhum pet cadastrado ainda.'}</td></tr>)}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        </div>
-    );
-};
-
-const ClinicalRecordForm = ({ recordToEdit, onSave, onClose }) => {
-    const [record, setRecord] = useState(recordToEdit || { date: new Date().toISOString().split('T')[0], anamnesis: '', suspicion: '', diagnosis: '', treatment: '', examResults: '' });
-    const handleChange = (e) => setRecord(prev => ({ ...prev, [e.target.name]: e.target.value }));
-    const handleSubmit = (e) => { e.preventDefault(); onSave(record); };
-    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">{recordToEdit ? 'Editar Registro' : 'Novo Registro Clínico'}</h3><div><label className="text-sm text-gray-400">Data da Consulta</label><input type="date" name="date" value={record.date} onChange={handleChange} className="input-style w-full" required /></div><textarea name="anamnesis" value={record.anamnesis} onChange={handleChange} placeholder="Anamnese" className="input-style w-full min-h-[100px]"></textarea><textarea name="suspicion" value={record.suspicion} onChange={handleChange} placeholder="Suspeita Clínica" className="input-style w-full min-h-[100px]"></textarea><textarea name="diagnosis" value={record.diagnosis} onChange={handleChange} placeholder="Diagnóstico Definitivo" className="input-style w-full min-h-[100px]"></textarea><textarea name="treatment" value={record.treatment} onChange={handleChange} placeholder="Tratamento Prescrito" className="input-style w-full min-h-[100px]"></textarea><textarea name="examResults" value={record.examResults} onChange={handleChange} placeholder="Resultados de Exames" className="input-style w-full min-h-[100px]"></textarea><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar Registro</button></div></form>);
-};
-
-const ClinicalRecordModal = ({ pet, userId, onClose }) => {
-    const [records, setRecords] = useState([]);
-    const [isFormOpen, setIsFormOpen] = useState(false);
-    const [recordToEdit, setRecordToEdit] = useState(null);
-    useEffect(() => {
-        if (!userId || !pet) return;
-        const q = query(collection(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`), orderBy('date', 'desc'));
-        const unsubscribe = onSnapshot(q, (snapshot) => setRecords(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))));
-        return () => unsubscribe();
-    }, [userId, pet]);
-    const handleSaveRecord = async (recordData) => {
-        const recordId = recordToEdit?.id || `record_${new Date().getTime()}`;
-        const recordRef = doc(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`, recordId);
-        await setDoc(recordRef, { ...recordData, id: recordId }, { merge: true });
-        setIsFormOpen(false); setRecordToEdit(null);
-    };
-    const handleDeleteRecord = async (recordId) => {
-        if(window.confirm("Tem certeza que deseja excluir este registro clínico?")){
-            const recordRef = doc(db, `artifacts/${appId}/users/${userId}/pets/${pet.id}/clinicalRecords`, recordId);
-            await deleteDoc(recordRef);
-        }
-    };
-    const openFormToAdd = () => { setRecordToEdit(null); setIsFormOpen(true); };
-    const openFormToEdit = (record) => { setRecordToEdit(record); setIsFormOpen(true); };
-    const DetailSection = ({ label, content }) => (content ? (<div><h4 className="font-semibold text-cyan-400">{label}</h4><p className="text-gray-300 whitespace-pre-wrap">{content}</p></div>) : null);
-    return (<> <div className="space-y-6"><div className="flex justify-between items-center"><h2 className="text-3xl font-bold text-white">Prontuário de <span className="text-cyan-400">{pet.name}</span></h2><button onClick={openFormToAdd} className="btn-primary flex items-center gap-2"><PlusCircle size={20} /> Adicionar Registro</button></div><div className="space-y-4">{records.length > 0 ? (records.map(record => (<details key={record.id} className="bg-gray-700/50 rounded-lg p-4 cursor-pointer"><summary className="flex justify-between items-center font-semibold"><span>Consulta de {formatDate(record.date)}</span><div className="flex items-center gap-3"><button onClick={(e) => {e.preventDefault(); openFormToEdit(record)}} className="text-yellow-400 hover:text-yellow-300"><Edit size={18}/></button><button onClick={(e) => {e.preventDefault(); handleDeleteRecord(record.id)}} className="text-red-500 hover:text-red-400"><Trash2 size={18}/></button></div></summary><div className="mt-4 pt-4 border-t border-gray-600 space-y-3"><DetailSection label="Anamnese" content={record.anamnesis} /><DetailSection label="Suspeita Clínica" content={record.suspicion} /><DetailSection label="Diagnóstico" content={record.diagnosis} /><DetailSection label="Tratamento" content={record.treatment} /><DetailSection label="Exames" content={record.examResults} /></div></details>))) : (<p className="text-center text-gray-400 italic py-8">Nenhum registro clínico para este pet.</p>)}</div></div> <Modal isOpen={isFormOpen} onClose={() => setIsFormOpen(false)}><ClinicalRecordForm recordToEdit={recordToEdit} onSave={handleSaveRecord} onClose={() => setIsFormOpen(false)} /></Modal></>);
-};
-
-// --- Componentes de Estoque ---
-
-const useStock = (userId, setPermissionError) => {
-    const [products, setProducts] = useState([]);
-    const [isInitialized, setIsInitialized] = useState(false);
-    const stockCollectionPath = `artifacts/${appId}/users/${userId}/stock`;
-    
-    const initializeStock = async () => {
-        const batch = writeBatch(db);
-        const defaultProducts = [...Object.values(vaccineTypes), ...Object.keys(antiParasiteProducts).filter(p => p !== 'Outro')];
-        defaultProducts.forEach(name => {
-            const id = `prod_${name.replace(/\s+/g, '_').toLowerCase()}`;
-            const newProduct = { id, nome: name, unidade: 'Unidade', lotes: [] };
-            const productRef = doc(db, stockCollectionPath, id);
-            batch.set(productRef, newProduct, { merge: true });
-        });
-        await batch.commit();
-    };
-
-    useEffect(() => {
-        if (!userId) {
-            setProducts([]);
-            setIsInitialized(false);
-            return;
-        }
-        const q = query(collection(db, stockCollectionPath), orderBy('nome'));
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-            setPermissionError(false);
-            const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-            setProducts(productsData);
-            if (!isInitialized && snapshot.empty) {
-                initializeStock();
-                setIsInitialized(true);
-            } else if (!isInitialized) {
-                setIsInitialized(true);
-            }
-        }, (error) => {
-            if (error.code === 'permission-denied') {
-                setPermissionError(true);
-            }
-            console.error("Erro ao buscar estoque:", error);
-        });
-        return () => unsubscribe();
-    }, [userId, isInitialized, setPermissionError]);
-    
-    const addProduct = async (productData) => {
-        const id = `prod_${new Date().getTime()}`;
-        const firstLote = {
-            idLote: `lote_${new Date().getTime()}`,
-            quantidade: Number(productData.quantidadeInicial),
-            dataEntrada: new Date().toISOString().split('T')[0],
-            dataValidade: productData.dataValidade,
-        };
-        const newProduct = { id, nome: productData.nome, unidade: productData.unidade, lotes: [firstLote] };
-        await setDoc(doc(db, stockCollectionPath, id), newProduct);
-    };
-    
-    const updateProduct = async (productId, productData) => await updateDoc(doc(db, stockCollectionPath, productId), productData);
-    const deleteProduct = async (productId) => await deleteDoc(doc(db, stockCollectionPath, productId));
-
-    const registerEntry = async (productId, entryData) => {
-        const product = products.find(p => p.id === productId);
-        if (!product) return;
-        const newLote = { idLote: `lote_${new Date().getTime()}`, quantidade: Number(entryData.quantidade), dataEntrada: new Date().toISOString().split('T')[0], dataValidade: entryData.dataValidade };
-        await updateDoc(doc(db, stockCollectionPath, productId), { lotes: [...product.lotes, newLote] });
-    };
-
-    const registerExit = async (productId, quantityToExit) => {
-        const product = products.find(p => p.id === productId);
-        if (!product) return;
-        let remainingQty = Number(quantityToExit);
-        const sortedLotes = [...product.lotes].sort((a, b) => new Date(a.dataValidade) - new Date(b.dataValidade));
-        const updatedLotes = [];
-        for (const lote of sortedLotes) {
-            if (remainingQty <= 0) { updatedLotes.push(lote); continue; }
-            if (lote.quantidade >= remainingQty) {
-                updatedLotes.push({ ...lote, quantidade: lote.quantidade - remainingQty });
-                remainingQty = 0;
-            } else { remainingQty -= lote.quantidade; }
-        }
-        if (remainingQty > 0) { console.error("Estoque insuficiente."); return; }
-        await updateDoc(doc(db, stockCollectionPath, productId), { lotes: updatedLotes.filter(l => l.quantidade > 0) });
-    };
-    
-    const depleteStockByName = async (productName, quantity) => {
-        const product = products.find(p => p.nome.toLowerCase() === productName.toLowerCase());
-        if (product) {
-            await registerExit(product.id, quantity);
-        } else {
-            console.warn(`Produto "${productName}" não encontrado no estoque para dar baixa.`);
-        }
-    };
-
-    return { products, addProduct, updateProduct, deleteProduct, registerEntry, registerExit, depleteStockByName };
-};
-
-const ProductFormModal = ({ productToEdit, onSave, onClose }) => {
-    const isEditing = !!productToEdit;
-    const [product, setProduct] = useState(
-        isEditing
-        ? { nome: productToEdit.nome, unidade: productToEdit.unidade }
-        : { nome: '', unidade: 'Unidade', quantidadeInicial: '', dataValidade: '' }
-    );
-    
-    const handleChange = e => setProduct({...product, [e.target.name]: e.target.value});
-    const handleSubmit = e => { e.preventDefault(); onSave(product); onClose(); };
-
-    return (
-        <form onSubmit={handleSubmit} className="space-y-4">
-            <h3 className="text-2xl font-bold text-cyan-400">{isEditing ? 'Editar Produto' : 'Adicionar Novo Produto'}</h3>
-            <input name="nome" value={product.nome} onChange={handleChange} placeholder="Nome do Produto" className="input-style w-full" required />
-            <input name="unidade" value={product.unidade} onChange={handleChange} placeholder="Unidade (ex: Comprimido, mL)" className="input-style" />
-            {!isEditing && (
-                <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-700">
-                    <input type="number" name="quantidadeInicial" value={product.quantidadeInicial} onChange={handleChange} placeholder="Qtd. Inicial" className="input-style" required min="1"/>
-                    <div>
-                        <label className="text-sm text-gray-400">Validade do 1º Lote</label>
-                        <input type="date" name="dataValidade" value={product.dataValidade} onChange={handleChange} className="input-style w-full" required/>
-                    </div>
-                </div>
-            )}
-            <div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Salvar</button></div>
-        </form>
-    );
-};
-
-const RegisterEntryModal = ({ products, onSave, onClose }) => {
-    const [entry, setEntry] = useState({ productId: '', quantidade: '', dataValidade: '' });
-    const handleChange = e => setEntry({...entry, [e.target.name]: e.target.value});
-    const handleSubmit = e => { e.preventDefault(); onSave(entry.productId, { quantidade: entry.quantidade, dataValidade: entry.dataValidade }); onClose(); };
-    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">Registrar Entrada de Lote</h3><select name="productId" value={entry.productId} onChange={handleChange} className="input-style w-full" required><option value="">-- Selecione um Produto --</option>{products.map(p => <option key={p.id} value={p.id}>{p.nome}</option>)}</select><div className="grid grid-cols-2 gap-4"><input type="number" name="quantidade" value={entry.quantidade} onChange={handleChange} placeholder="Quantidade" className="input-style" required min="1"/><div><label className="text-sm text-gray-400">Data de Validade</label><input type="date" name="dataValidade" value={entry.dataValidade} onChange={handleChange} className="input-style w-full" required/></div></div><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Registrar</button></div></form>);
-};
-
-const RegisterExitModal = ({ products, onSave, onClose }) => {
-    const [exit, setExit] = useState({ productId: '', quantidade: '' });
-    const handleChange = e => setExit({...exit, [e.target.name]: e.target.value});
-    const handleSubmit = e => { e.preventDefault(); onSave(exit.productId, exit.quantidade); onClose(); };
-    return (<form onSubmit={handleSubmit} className="space-y-4"><h3 className="text-2xl font-bold text-cyan-400">Registrar Saída de Produto</h3><select name="productId" value={exit.productId} onChange={handleChange} className="input-style w-full" required><option value="">-- Selecione um Produto --</option>{products.map(p => <option key={p.id} value={p.id}>{p.nome}</option>)}</select><input type="number" name="quantidade" value={exit.quantidade} onChange={handleChange} placeholder="Quantidade a retirar" className="input-style w-full" required min="1"/><div className="flex justify-end gap-3 pt-4"><button type="button" onClick={onClose} className="btn-secondary">Cancelar</button><button type="submit" className="btn-primary">Registrar</button></div></form>);
-};
-
-const StockDashboard = ({ userId, setPermissionError }) => {
-    const { products, addProduct, updateProduct, deleteProduct, registerEntry, registerExit } = useStock(userId, setPermissionError);
-    const [modal, setModal] = useState({ type: null, data: null });
-    const [searchTerm, setSearchTerm] = useState('');
-    const [statusFilter, setStatusFilter] = useState('Todos');
-
-    const filteredProducts = useMemo(() => {
-        const today = new Date(); today.setHours(0,0,0,0);
-        const thirtyDaysFromNow = new Date(); thirtyDaysFromNow.setDate(today.getDate() + 30);
-        
-        const productsWithStatus = products.map(p => {
-            const totalQuantity = p.lotes.reduce((sum, lote) => sum + lote.quantidade, 0);
-            let status = { text: 'OK', color: 'bg-green-500' };
-            const hasExpired = p.lotes.some(l => new Date(l.dataValidade) < today);
-            const hasNearingExpiry = p.lotes.some(l => new Date(l.dataValidade) < thirtyDaysFromNow);
-            if (hasExpired) status = { text: 'VENCIDO', color: 'bg-red-500' };
-            else if (hasNearingExpiry) status = { text: 'VENC. PRÓXIMO', color: 'bg-orange-500' };
-            else if (totalQuantity < 20) status = { text: 'ESTOQUE BAIXO', color: 'bg-yellow-500' };
-            return { ...p, totalQuantity, status };
-        });
-
-        let filtered = productsWithStatus;
-        if (searchTerm) {
-            filtered = filtered.filter(p => p.nome.toLowerCase().includes(searchTerm.toLowerCase()));
-        }
-        if (statusFilter !== 'Todos') {
-            filtered = filtered.filter(p => p.status.text === statusFilter);
-        }
-        return filtered;
-    }, [products, searchTerm, statusFilter]);
-    
-    const StatusFilterButton = ({ filterValue, label }) => {
-        const isActive = statusFilter === filterValue;
-        return (<button onClick={() => setStatusFilter(filterValue)} className={`px-3 py-1.5 rounded-full text-xs sm:text-sm font-semibold transition-colors ${isActive ? 'bg-cyan-500 text-gray-900 shadow-md' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}>{label}</button>);
-    };
-
-    return (
-        <div>
-            <div className="flex flex-col md:flex-row justify-between items-center mb-6 gap-4"><h2 className="text-3xl font-bold text-white">Controle de Estoque</h2><div className="flex gap-2"><button onClick={() => setModal({type: 'add'})} className="btn-secondary flex items-center gap-2"><PlusCircle size={18}/> Novo Produto</button><button onClick={() => setModal({type: 'entry'})} className="btn-secondary flex items-center gap-2"><ArrowUp size={18}/> Entrada</button><button onClick={() => setModal({type: 'exit'})} className="btn-secondary flex items-center gap-2"><ArrowDown size={18}/> Saída</button></div></div>
-            
-            <div className="bg-gray-800/80 p-4 rounded-xl mb-6"><div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div><h4 className="flex items-center text-lg font-semibold text-white mb-3"><Search size={20} className="mr-2 text-cyan-400" />Buscar Produto</h4><input type="text" placeholder="Digite o nome do produto..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="input-style w-full"/></div>
-                <div><h4 className="flex items-center text-lg font-semibold text-white mb-3"><Filter size={20} className="mr-2 text-cyan-400" />Filtrar por Status</h4><div className="flex flex-wrap gap-2"><StatusFilterButton filterValue="Todos" label="Todos" /><StatusFilterButton filterValue="OK" label="OK" /><StatusFilterButton filterValue="ESTOQUE BAIXO" label="Estoque Baixo" /><StatusFilterButton filterValue="VENC. PRÓXIMO" label="Venc. Próximo" /><StatusFilterButton filterValue="VENCIDO" label="Vencido" /></div></div>
-            </div></div>
-
-            <div className="bg-gray-800/80 backdrop-blur-sm rounded-xl shadow-lg overflow-hidden"><div className="overflow-x-auto">
-                <table className="w-full text-left">
-                    <thead className="bg-gray-900/50"><tr className="text-sm"><th className="p-4">PRODUTO</th><th className="p-4 text-center">QTD. TOTAL</th><th className="p-4">STATUS</th><th className="p-4">LOTES</th><th className="p-4">AÇÕES</th></tr></thead>
-                    <tbody>
-                        {filteredProducts.length > 0 ? filteredProducts.map(p => (
-                            <tr key={p.id} className="border-b border-gray-700 hover:bg-gray-700/50">
-                                <td className="p-4 font-medium text-cyan-400">{p.nome}<span className="block text-xs text-gray-400">{p.unidade}</span></td>
-                                <td className="p-4 text-center font-bold text-xl">{p.totalQuantity}</td>
-                                <td className="p-4"><span className={`px-2 py-1 text-xs font-bold text-white rounded-full ${p.status.color}`}>{p.status.text}</span></td>
-                                <td className="p-4 text-xs text-gray-400">{p.lotes.sort((a,b) => new Date(a.dataValidade) - new Date(b.dataValidade)).map(l => (<div key={l.idLote}>Qtd: {l.quantidade} / Val: {formatDate(l.dataValidade)}</div>))}</td>
-                                <td className="p-4"><div className="flex gap-3"><button onClick={() => setModal({type: 'edit', data: p})} className="text-yellow-400 hover:text-yellow-300"><Edit size={18}/></button><button onClick={() => window.confirm(`Deseja excluir "${p.nome}"?`) && deleteProduct(p.id)} className="text-red-500 hover:text-red-400"><Trash2 size={18}/></button></div></td>
-                            </tr>
-                        )) : (<tr><td colSpan="5" className="text-center p-8 text-gray-400 italic">Nenhum produto encontrado com os filtros atuais.</td></tr>)}
-                    </tbody>
-                </table>
-            </div></div>
-            <Modal isOpen={modal.type === 'add' || modal.type === 'edit'} onClose={() => setModal({type: null})}>
-                <ProductFormModal productToEdit={modal.type === 'edit' ? modal.data : null} onSave={(data) => modal.type === 'add' ? addProduct(data) : updateProduct(modal.data.id, data)} onClose={() => setModal({type: null})}/>
-            </Modal>
-            <Modal isOpen={modal.type === 'entry'} onClose={() => setModal({type: null})}><RegisterEntryModal products={products} onSave={registerEntry} onClose={() => setModal({type: null})} /></Modal>
-            <Modal isOpen={modal.type === 'exit'} onClose={() => setModal({type: null})}><RegisterExitModal products={products} onSave={registerExit} onClose={() => setModal({type: null})} /></Modal>
-        </div>
-    );
-};
-
-
-const Header = ({ user, onLogout }) => (
-    <header className="mb-8 flex justify-between items-center">
-        <div><h1 className="text-4xl font-extrabold text-white"><span className="text-cyan-400">Vet</span><span className="text-white">Control</span></h1><p className="text-gray-400 mt-1">Gestão de Saúde Preventiva para Pets</p></div>
-        {user && (<div className="flex items-center gap-4"><div className="text-right hidden sm:block"><p className="font-semibold text-white">{user.isAnonymous ? "Modo de Desenvolvimento" : (user.displayName || user.email)}</p>{user.isAnonymous && <p className="text-sm text-yellow-400">Sessão Temporária</p>}</div>{user.isAnonymous ? <UserCircle className="w-12 h-12 text-cyan-400"/> : (user.photoURL && <img src={user.photoURL} alt="User" className="w-12 h-12 rounded-full border-2 border-cyan-400" />)}<button onClick={onLogout} className="btn-secondary flex items-center gap-2"><LogOut size={18}/> Sair</button></div>)}
-    </header>
-);
-
-const LoginScreen = ({ onLogin, onSignUp }) => {
-    const [isLoginView, setIsLoginView] = useState(true);
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
-
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setError('');
-        try {
-            if (isLoginView) await onLogin(email, password);
-            else await onSignUp(email, password);
-        } catch (err) {
-            switch(err.code) {
-                case 'auth/invalid-email': setError('Formato de e-mail inválido.'); break;
-                case 'auth/user-not-found': case 'auth/wrong-password': setError('E-mail ou senha incorretos.'); break;
-                case 'auth/email-already-in-use': setError('Este e-mail já está em uso.'); break;
-                 case 'auth/weak-password': setError('A senha deve ter pelo menos 6 caracteres.'); break;
-                default: setError('Ocorreu um erro. Tente novamente.'); break;
-            }
-        }
-    };
-
-    return (
-        <div className="flex flex-col items-center justify-center min-h-screen">
-            <div className="w-full max-w-md text-center p-8 bg-gray-800/80 rounded-2xl shadow-2xl backdrop-blur-sm">
-                <h1 className="text-5xl font-extrabold text-white mb-2"><span className="text-cyan-400">Vet</span><span className="text-white">Control</span></h1>
-                <p className="text-gray-400 mb-8">{isLoginView ? 'Acesse sua conta' : 'Crie uma nova conta'}</p>
-                <form onSubmit={handleSubmit} className="space-y-4">
-                    <div className="relative"><Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="E-mail" className="input-style w-full pl-10" required/></div>
-                    <div className="relative"><Lock className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20}/><input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Senha" className="input-style w-full pl-10" required/></div>
-                    {error && <p className="text-red-500 text-sm text-center">{error}</p>}
-                    <button type="submit" className="w-full btn-primary flex items-center justify-center gap-2">{isLoginView ? <><LogIn size={20} /> Entrar</> : <><UserPlus size={20} /> Criar Conta</>}</button>
-                </form>
-            </div>
-        </div>
-    );
-};
-
-const PermissionErrorDisplay = () => (
-    <div className="bg-red-900/50 border-l-4 border-red-500 text-red-200 p-6 rounded-lg max-w-4xl mx-auto mt-10">
-        <h3 className="flex items-center text-2xl font-bold mb-4"><AlertTriangle className="mr-3"/>Erro de Permissão do Firebase</h3>
-        <p className="mb-4">O aplicativo não conseguiu acessar os dados porque as regras de segurança do seu banco de dados Firebase Firestore estão bloqueando o acesso.</p>
-        <p className="mb-2">Para corrigir isso, por favor, siga estes passos:</p>
-        <ol className="list-decimal list-inside space-y-2 mb-4">
-            <li>Acesse o <a href={`https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/rules`} target="_blank" rel="noopener noreferrer" className="font-bold underline hover:text-white">Console do Firebase</a> do seu projeto.</li>
-            <li>Vá para a seção <strong>Firestore Database</strong> e clique na aba <strong>"Regras"</strong> (ou "Rules").</li>
-            <li>Substitua todo o conteúdo do editor de regras pelo código abaixo e clique em <strong>"Publicar"</strong>.</li>
-        </ol>
-        <pre className="bg-gray-900 p-4 rounded-md text-sm text-white overflow-x-auto"><code>
-{`rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /artifacts/{appId}/users/{userId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
-  }
-}`}
-        </code></pre>
-        <p className="mt-4 text-sm text-red-300">Após publicar as novas regras, por favor, atualize esta página.</p>
     </div>
-);
 
+    <!-- ==== APLICAÇÃO PRINCIPAL ==== -->
+    <div id="app-screen" class="hidden">
+        <header class="bg-purple-900 text-white shadow-md p-4 flex justify-between items-center">
+            <div class="w-1/4"></div><h1 class="text-2xl md:text-3xl font-bold text-center flex-grow">Controle Veterinário</h1><div class="w-1/4 flex justify-end"><button id="logout-button" class="bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 transition-colors">Sair</button></div>
+        </header>
 
-// --- Componente Principal ---
-export default function App() {
-    const [user, setUser] = useState(null);
-    const [userId, setUserId] = useState(null);
-    const [pets, setPets] = useState([]);
-    const [activeTab, setActiveTab] = useState('dashboard');
-    const [isPetModalOpen, setIsPetModalOpen] = useState(false);
-    const [isHealthModalOpen, setIsHealthModalOpen] = useState(false);
-    const [isClinicalRecordModalOpen, setIsClinicalRecordModalOpen] = useState(false);
-    const [selectedPet, setSelectedPet] = useState(null);
-    const [isAuthLoading, setIsAuthLoading] = useState(true);
-    const [permissionError, setPermissionError] = useState(false);
-    const { depleteStockByName } = useStock(userId, setPermissionError);
+        <main class="p-4 md:p-8">
+            <div class="flex justify-center mb-6"><nav class="flex flex-wrap space-x-2 md:space-x-4 bg-purple-200 p-1 rounded-lg" aria-label="Tabs"><button class="tab-button active" data-tab="dashboard">Dashboard</button><button class="tab-button" data-tab="pets">Pets</button><button class="tab-button" data-tab="vaccines">Vacinas</button><button class="tab-button" data-tab="parasite-control">Controle Parasitário</button><button class="tab-button" data-tab="stock">Estoque</button></nav></div>
+            <div id="filters-container" class="mb-6 p-4 bg-purple-800 rounded-lg shadow-sm flex flex-col md:flex-row items-center gap-4"><div class="w-full md:flex-grow"><label for="universal-search" class="sr-only">Buscar</label><input type="text" id="universal-search" placeholder="Buscar por Pet, Tutor ou Produto..." class="border rounded-lg px-3 py-2 w-full focus:outline-none focus:ring-2 focus:ring-purple-500"></div><div id="date-filters" class="hidden w-full md:w-auto md:flex items-center gap-2"><label class="text-sm font-medium text-purple-100">Próxima Dose Entre:</label><input type="date" id="start-date-filter" class="border rounded-lg px-3 py-2"><span class="text-purple-300">e</span><input type="date" id="end-date-filter" class="border rounded-lg px-3 py-2"><button id="clear-filters-button" title="Limpar filtros" class="bg-purple-200 text-purple-800 p-2 rounded-lg hover:bg-purple-300"><i class="fas fa-times"></i></button></div></div>
+            <div id="tab-contents"><div id="dashboard-tab" class="tab-content"></div><div id="pets-tab" class="tab-content hidden"></div><div id="stock-tab" class="tab-content hidden"></div><div id="vaccines-tab" class="tab-content hidden"></div><div id="parasite-control-tab" class="tab-content hidden"></div></div>
+            <div id="pet-details-view" class="hidden mt-8"></div>
+        </main>
+    </div>
 
-    useEffect(() => {
-        const authUnsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-            setUser(firebaseUser); 
-            setUserId(firebaseUser ? firebaseUser.uid : null); 
-            setIsAuthLoading(false);
-        });
-        return () => authUnsubscribe();
-    }, []);
+    <!-- ==== MODAIS ==== -->
+    <div id="pet-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 id="pet-modal-title" class="text-xl font-bold mb-4"></h2><form id="pet-form"><input type="hidden" id="pet-id"><div class="grid grid-cols-1 md:grid-cols-2 gap-4"><input type="text" id="pet-name" placeholder="Nome do Pet" class="border p-2 rounded w-full" required><input type="text" id="pet-species" placeholder="Espécie (Cão, Gato)" class="border p-2 rounded w-full" required><input type="text" id="pet-breed" placeholder="Raça" class="border p-2 rounded w-full" required><input type="text" id="pet-color" placeholder="Cor da Pelagem" class="border p-2 rounded w-full"><input type="number" id="pet-weight" placeholder="Peso (kg)" step="0.1" class="border p-2 rounded w-full"><div><label for="pet-birthdate" class="text-sm text-gray-600">Nascimento</label><input type="date" id="pet-birthdate" class="border p-2 rounded w-full" required></div><input type="text" id="tutor-name" placeholder="Nome do Tutor" class="border p-2 rounded w-full" required><input type="tel" id="tutor-contact" placeholder="Contato do Tutor" class="border p-2 rounded w-full" required></div><div class="mt-4 md:col-span-2 flex items-center"><input type="checkbox" id="pet-daycare" class="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"><label for="pet-daycare" class="ml-2 block text-sm text-gray-900">Pet de Creche/Hotel?</label></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded">Salvar</button></div></form></div></div>
+    <div id="record-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 id="record-modal-title" class="text-xl font-bold mb-4"></h2><form id="record-form"><input type="hidden" id="record-id"><input type="hidden" id="record-type"><div class="mb-4"><label class="block text-gray-700 mb-2">Produto/Vacina</label><select id="product-select" class="w-full border p-2 rounded"></select></div><div id="other-product-container" class="hidden mb-4 space-y-2"><label class="block text-gray-700">Nome do Produto (Outros)</label><input type="text" id="other-product-name" class="w-full border p-2 rounded"></div><div class="mb-4"><label class="block text-gray-700 mb-2">Data da Aplicação</label><input type="date" id="application-date" class="w-full border p-2 rounded" required></div><div class="flex items-center mb-4"><input type="checkbox" id="applied-elsewhere" class="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500"><label for="applied-elsewhere" class="ml-2 block text-sm text-gray-900">Aplicado noutro local (não debitar do stock)</label></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded">Salvar</button></div></form></div></div>
+    <div id="consultation-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-3xl modal m-auto"><h2 id="consultation-modal-title" class="text-xl font-bold mb-4"></h2><form id="consultation-form"><input type="hidden" id="consultation-id"><div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4"><div class="md:col-span-2"><label class="block text-gray-700 mb-2">Queixa Principal / Motivo</label><textarea id="consultation-complaint" class="w-full border p-2 rounded" rows="2" required></textarea></div><div><label class="block text-gray-700 mb-2">Data da Consulta</label><input type="date" id="consultation-date" class="w-full border p-2 rounded" required></div><div><label class="block text-gray-700 mb-2">Peso (kg)</label><input type="number" id="consultation-weight" step="0.1" class="w-full border p-2 rounded" required></div><div class="md:col-span-2"><label class="block text-gray-700 mb-2">Exame Físico e Observações</label><textarea id="consultation-exam" class="w-full border p-2 rounded" rows="4"></textarea></div><div class="md:col-span-2"><label class="block text-gray-700 mb-2">Diagnóstico(s)</label><textarea id="consultation-diagnosis" class="w-full border p-2 rounded" rows="2"></textarea></div><div class="md:col-span-2"><label class="block text-gray-700 mb-2">Tratamento / Prescrição</label><textarea id="consultation-treatment" class="w-full border p-2 rounded" rows="3"></textarea></div><div class="md:col-span-2"><label class="block text-gray-700 mb-2">Data do Retorno (Opcional)</label><input type="date" id="consultation-followup" class="w-full border p-2 rounded"></div></div><div class="md:col-span-2 mt-6 border-t pt-4"><div class="flex justify-between items-center mb-2"><h3 class="text-lg font-semibold text-gray-700">Procedimentos Realizados na Consulta</h3><button type="button" id="add-procedure-row-btn" class="bg-green-500 text-white px-3 py-1 rounded-md text-sm hover:bg-green-600">+ Adicionar Procedimento</button></div><div id="consultation-procedures-container" class="space-y-2"></div></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded">Salvar Consulta</button></div></form></div></div>
+    <div id="confirm-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-sm modal m-auto"><h2 class="text-lg font-bold mb-4">Confirmar</h2><p id="confirm-modal-text" class="mb-6"></p><div class="flex justify-end"><button id="cancel-delete" class="bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button id="confirm-delete" class="bg-orange-600 text-white px-4 py-2 rounded">Confirmar</button></div></div></div>
     
-    useEffect(() => {
-        if (!userId) { setPets([]); return; }
-        const q = collection(db, `artifacts/${appId}/users/${userId}/pets`);
-        const unsubscribe = onSnapshot(q, (snapshot) => {
-            setPermissionError(false);
-            setPets(snapshot.docs.map(doc => doc.data()).sort((a, b) => a.name.localeCompare(b.name)));
-        }, (error) => {
-            if (error.code === 'permission-denied') {
-                setPermissionError(true);
-            }
-            console.error("Erro ao buscar pets:", error)
-        });
-        return () => unsubscribe();
-    }, [userId]);
-    
-    const handleLogin = (email, password) => signInWithEmailAndPassword(auth, email, password);
-    const handleSignUp = (email, password) => createUserWithEmailAndPassword(auth, email, password);
-    const handleLogout = async () => await signOut(auth).catch(e => console.error("Erro ao sair:", e));
+    <div id="product-catalog-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 id="product-catalog-modal-title" class="text-xl font-bold mb-4"></h2><form id="product-catalog-form"><input type="hidden" id="product-catalog-id"><div class="space-y-4"><div><label class="block text-gray-700">Nome do Produto</label><input type="text" id="product-catalog-name" class="w-full border p-2 rounded" required></div><div><label class="block text-gray-700">Categoria</label><select id="product-catalog-category" class="w-full border p-2 rounded" required><option value="Vacinas">Vacinas</option><option value="Controle Parasitário">Controle Parasitário</option><option value="Medicamentos">Medicamentos</option><option value="Descartáveis">Descartáveis</option></select></div><div><label class="block text-gray-700">Unidade (ex: Dose, Comprimido)</label><input type="text" id="product-catalog-unit" class="w-full border p-2 rounded"></div><div><label class="block text-gray-700">Alerta de Estoque Mínimo</label><input type="number" id="product-catalog-min-stock" class="w-full border p-2 rounded" required min="0"></div></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Salvar Produto</button></div></form></div></div>
+    <div id="stock-details-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-3xl modal m-auto"><h2 id="stock-details-modal-title" class="text-xl font-bold mb-4">Detalhes do Produto</h2><div id="stock-details-content"></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded">Fechar</button></div></div></div>
+    <div id="lote-entry-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 class="text-xl font-bold mb-4">Registrar Entrada de Lote</h2><form id="lote-entry-form"><input type="hidden" id="lote-entry-product-id"><div class="space-y-4"><div><label class="block text-gray-700 mb-2">Quantidade</label><input type="number" id="lote-quantity" class="w-full border p-2 rounded" required min="1"></div><div><label class="block text-gray-700 mb-2">Data de Validade</label><input type="date" id="lote-expiry" class="w-full border p-2 rounded" required></div></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Salvar Lote</button></div></form></div></div>
+    <div id="manual-deduction-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 class="text-xl font-bold mb-4">Baixa Manual de Estoque</h2><form id="manual-deduction-form"><input type="hidden" id="deduction-product-id"><div class="space-y-4"><p class="text-sm">Produto: <strong id="deduction-product-name"></strong></p><div><label class="block text-gray-700 mb-2">Quantidade para Dar Baixa</label><input type="number" id="deduction-quantity" class="w-full border p-2 rounded" required min="1"></div></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-orange-600 text-white px-4 py-2 rounded">Confirmar Baixa</button></div></form></div></div>
+    <div id="stock-adjustment-modal" class="fixed inset-0 z-50 hidden modal-backdrop overflow-y-auto p-4 flex"><div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-lg modal m-auto"><h2 class="text-xl font-bold mb-4">Ajuste de Estoque (Baixa Manual)</h2><form id="stock-adjustment-form"><input type="hidden" id="adjustment-lote-id"><div class="space-y-4"><p class="text-sm">Produto: <strong id="adjustment-product-name"></strong></p><p class="text-sm">Quantidade atual no lote: <strong id="adjustment-current-stock"></strong></p><div><label class="block text-gray-700 mb-2">Quantidade a Remover</label><input type="number" id="adjustment-quantity" class="w-full border p-2 rounded" required min="1"></div></div><div class="mt-6 flex justify-end"><button type="button" class="close-modal bg-gray-300 text-gray-800 px-4 py-2 rounded mr-2">Cancelar</button><button type="submit" class="bg-orange-600 text-white px-4 py-2 rounded">Confirmar Baixa</button></div></form></div></div>
 
-    const handleSavePet = async (petData) => {
-        if (!userId) return;
-        await setDoc(doc(db, `artifacts/${appId}/users/${userId}/pets`, petData.id), petData, { merge: true }).catch(e => console.error("Erro ao salvar pet:", e));
-    };
-    const handleDeletePet = async (petId) => {
-        if (!userId || !window.confirm("Deseja excluir este pet e todos os seus registros?")) return;
-        await deleteDoc(doc(db, `artifacts/${appId}/users/${userId}/pets`, petId)).catch(e => console.error("Erro ao excluir pet:", e));
-    };
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, getDocs, doc, query, where, Timestamp, onSnapshot, updateDoc, deleteDoc, writeBatch, runTransaction, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        const firebaseConfig = { apiKey: "AIzaSyBdjJo5vLl-GqZuqn4Fzp0MRv0qmanaz7A", authDomain: "vetcontrol-3031f.firebaseapp.com", projectId: "vetcontrol-3031f", storageBucket: "vetcontrol-3031f.appspot.com", messagingSenderId: "244279756437", appId: "1:244279756437:web:d26d54d425d7d516d8fd9c" };
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
 
-    const handleAddPetClick = () => { setSelectedPet(null); setIsPetModalOpen(true); };
-    const handleEditPetClick = (pet) => { setSelectedPet(pet); setIsPetModalOpen(true); };
-    const handleManageHealthClick = (pet) => { setSelectedPet(pet); setIsHealthModalOpen(true); };
-    const handleManageClinicalRecordClick = (pet) => { setSelectedPet(pet); setIsClinicalRecordModalOpen(true); };
+        const loginScreen = document.getElementById('login-screen');
+        const appScreen = document.getElementById('app-screen');
+        const loginForm = document.getElementById('login-form');
+        const logoutButton = document.getElementById('logout-button');
+        const loginError = document.getElementById('login-error');
+        let isAppInitialized = false;
+        let unsubscribeListeners = [];
 
-    const renderContent = () => {
-        if (permissionError) {
-            return <PermissionErrorDisplay />;
-        }
-        switch (activeTab) {
-            case 'dashboard': return <Dashboard pets={pets} onSelectPet={handleManageHealthClick} />;
-            case 'pets': return <PetList pets={pets} onAddPet={handleAddPetClick} onEditPet={handleEditPetClick} onDeletePet={handleDeletePet} onManageHealth={handleManageHealthClick} onManageClinicalRecord={handleManageClinicalRecordClick}/>;
-            case 'stock': return <StockDashboard userId={userId} setPermissionError={setPermissionError} />;
-            default: return null;
-        }
-    };
+        onAuthStateChanged(auth, user => { if (user && !isAppInitialized) { isAppInitialized = true; loginScreen.classList.add('hidden'); appScreen.classList.remove('hidden'); initializeAppLogic(); } else if (!user) { loginScreen.classList.remove('hidden'); appScreen.classList.add('hidden'); unsubscribeListeners.forEach(unsub => unsub()); unsubscribeListeners = []; isAppInitialized = false; }});
+        loginForm.addEventListener('submit', e => { e.preventDefault(); const email = document.getElementById('email').value; const password = document.getElementById('password').value; signInWithEmailAndPassword(auth, email, password).catch(err => { loginError.textContent = "Email ou senha inválidos."; loginError.classList.remove('hidden'); }); });
+        logoutButton.addEventListener('click', () => signOut(auth));
 
-    const TabButton = ({ tabName, label, icon: Icon }) => {
-        const isActive = activeTab === tabName;
-        return (<button onClick={() => setActiveTab(tabName)} className={`px-4 py-2 text-sm md:text-base font-semibold rounded-t-lg transition-all duration-300 flex items-center gap-2 ${isActive ? 'bg-cyan-500 text-gray-900' : 'bg-gray-700/50 text-gray-300 hover:bg-gray-600/70'}`}><Icon size={18} /> {label}</button>);
-    };
-    
-    if (isAuthLoading) return <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white text-xl">Carregando...</div>;
-    
-    if (!user) return <LoginScreen onLogin={handleLogin} onSignUp={handleSignUp} />;
+        function initializeAppLogic() {
+            const mainContent = document.querySelector('#app-screen main');
+            const petDetailsView = document.getElementById('pet-details-view');
+            const petModal = document.getElementById('pet-modal'), petForm = document.getElementById('pet-form');
+            const recordModal = document.getElementById('record-modal'), recordForm = document.getElementById('record-form');
+            const consultationModal = document.getElementById('consultation-modal'), consultationForm = document.getElementById('consultation-form');
+            const confirmModal = document.getElementById('confirm-modal');
+            const productCatalogModal = document.getElementById('product-catalog-modal'), productCatalogForm = document.getElementById('product-catalog-form');
+            const stockAdjustmentModal = document.getElementById('stock-adjustment-modal'), stockAdjustmentForm = document.getElementById('stock-adjustment-form');
+            const manualDeductionModal = document.getElementById('manual-deduction-modal'), manualDeductionForm = document.getElementById('manual-deduction-form');
+            const loteEntryForm = document.getElementById('lote-entry-form');
+            const universalSearch = document.getElementById('universal-search'), dateFiltersContainer = document.getElementById('date-filters'), startDateFilter = document.getElementById('start-date-filter'), endDateFilter = document.getElementById('end-date-filter'), clearFiltersButton = document.getElementById('clear-filters-button');
 
-    return (
-        <>
-            <style>{`
-                body { background-color: #111827; color: #e5e7eb; font-family: 'Inter', sans-serif; }
-                .input-style { background-color: #374151; border: 1px solid #4b5563; color: white; padding: 12px; border-radius: 8px; width: 100%; transition: border-color 0.2s, box-shadow 0.2s; }
-                .input-style:focus { outline: none; border-color: #22d3ee; box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.3); }
-                .btn-primary { background-color: #06b6d4; color: white; padding: 12px 20px; border-radius: 8px; font-weight: 600; transition: background-color 0.2s; border: none; }
-                .btn-primary:hover { background-color: #0891b2; }
-                .btn-secondary { background-color: #4b5563; color: white; padding: 10px 20px; border-radius: 8px; font-weight: 600; transition: background-color 0.2s; }
-                .btn-secondary:hover { background-color: #6b7280; }
-                @keyframes fade-in-up { 0% { opacity: 0; transform: translateY(20px); } 100% { opacity: 1; transform: translateY(0); } }
-                .animate-fade-in-up { animation: fade-in-up 0.3s ease-out forwards; }
-            `}</style>
-            <div className="min-h-screen bg-gray-900 text-gray-200 p-4 sm:p-6 lg:p-8">
-                <Header user={user} onLogout={handleLogout} />
-                <main>
-                    <div className="mb-4 border-b border-gray-700"><nav className="flex space-x-2">
-                       <TabButton tabName="dashboard" label="Dashboard" icon={Bell}/>
-                       <TabButton tabName="pets" label="Pets" icon={UserCircle}/>
-                       <TabButton tabName="stock" label="Estoque" icon={Package} />
-                    </nav></div>
-                    <div className="bg-gray-800/50 p-4 md:p-6 rounded-b-xl rounded-r-xl">{renderContent()}</div>
-                </main>
-                <footer className="text-center mt-12 text-gray-500 text-sm"><p>Desenvolvido para gestão veterinária simplificada.</p></footer>
-            </div>
+            let allPets = [], allRecords = [], allConsultations = [], allStockProducts = [], allStockLots = [];
+            let currentPetId = null, activeTab = 'dashboard', stockCategoryFilter = 'Todos';
+
+            // --- FUNÇÕES DE UI E MODAIS ---
+            const showToast = (message, type = 'success') => { const toastContainer = document.getElementById('toast-container'); const toast = document.createElement('div'); toast.textContent = message; toast.className = `toast ${type}`; toastContainer.appendChild(toast); setTimeout(() => { toast.classList.add('show'); }, 10); setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 300); }, 3000); };
+            const openModal = (modal) => modal.classList.replace('hidden', 'flex');
+            const closeModal = (modal) => modal.classList.replace('flex', 'hidden');
+            document.querySelectorAll('.close-modal').forEach(btn => btn.addEventListener('click', (e) => closeModal(e.target.closest('.modal-backdrop'))));
+            function openConfirmModal(message, onConfirm) { document.getElementById('confirm-modal-text').textContent = message; openModal(confirmModal); const confirmBtn = document.getElementById('confirm-delete'); const cancelBtn = document.getElementById('cancel-delete'); const confirmHandler = () => { onConfirm(); closeModal(confirmModal); cleanup(); }; const cancelHandler = () => { closeModal(confirmModal); cleanup(); }; const cleanup = () => { confirmBtn.removeEventListener('click', confirmHandler); cancelBtn.removeEventListener('click', cancelHandler); }; confirmBtn.addEventListener('click', confirmHandler); cancelBtn.addEventListener('click', cancelHandler); }
+            const checkDaycareCompliance = (pet, records) => { if (!pet.isDaycare) return { compliant: true }; const petRecords = records.filter(r => r.petId === pet.id); const requiredVaccines = ["V10", "Giardia", "Raiva"]; const appliedVaccines = petRecords.filter(r => r.tipoEvento === 'Vacina' && !r.aplicadoExternamente).map(r => r.nomeProduto); const hasAllVaccines = requiredVaccines.every(v => appliedVaccines.includes(v)); const today = new Date(); today.setHours(0,0,0,0); const hasValidParasiteControl = petRecords.some(r => r.tipoEvento === 'Controle Parasitário' && r.proximaData.toDate() >= today); return { compliant: hasAllVaccines && hasValidParasiteControl }; };
+
+            // --- FUNÇÕES DE SETUP DE MODAIS E AÇÕES DE PETS ---
+            const openAddPetModal = () => { petForm.reset(); document.getElementById('pet-id').value = ''; document.getElementById('pet-modal-title').textContent = 'Adicionar Novo Pet'; openModal(petModal); };
+            const openEditPetModal = (petId) => { const pet = allPets.find(p => p.id === petId); if (!pet) return; petForm.reset(); document.getElementById('pet-id').value = pet.id; document.getElementById('pet-name').value = pet.nome; document.getElementById('pet-species').value = pet.especie; document.getElementById('pet-breed').value = pet.raca; document.getElementById('pet-color').value = pet.corPelagem || ''; document.getElementById('pet-weight').value = pet.peso || ''; document.getElementById('pet-birthdate').value = new Date(pet.dataNascimento.toMillis()).toISOString().split('T')[0]; document.getElementById('tutor-name').value = pet.nomeTutor; document.getElementById('tutor-contact').value = pet.contatoTutor; document.getElementById('pet-daycare').checked = pet.isDaycare || false; document.getElementById('pet-modal-title').textContent = 'Editar Pet'; openModal(petModal); };
+            async function deletePet(petId) { const batch = writeBatch(db); const recordsQuery = query(collection(db, 'registrosSaude'), where('petId', '==', petId)); const recordsSnap = await getDocs(recordsQuery); recordsSnap.forEach(recordDoc => batch.delete(recordDoc.ref)); const consultationsQuery = query(collection(db, 'consultas'), where('petId', '==', petId)); const consultationsSnap = await getDocs(consultationsQuery); consultationsSnap.forEach(consultDoc => batch.delete(consultDoc.ref)); batch.delete(doc(db, 'pets', petId)); await batch.commit(); showToast('Pet e todo seu histórico foram excluídos.', 'success'); }
+            function attachPetActionListeners() { document.getElementById('add-pet-button-main')?.addEventListener('click', openAddPetModal); document.querySelectorAll('.edit-pet-btn').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); openEditPetModal(btn.dataset.petId); })); document.querySelectorAll('.delete-pet-btn').forEach(btn => btn.addEventListener('click', e => { e.stopPropagation(); const petId = btn.dataset.petId; const pet = allPets.find(p=>p.id===petId); const petName = pet ? pet.nome : 'este pet'; openConfirmModal(`Deseja excluir ${petName} e todo o seu histórico (incluindo consultas)?`, () => deletePet(petId)); })); document.querySelectorAll('#pets-tab tr[data-pet-id]').forEach(row => row.addEventListener('click', () => showPetDetailsView(row.dataset.petId))); }
             
-            <Modal isOpen={isPetModalOpen} onClose={() => setIsPetModalOpen(false)}><PetForm petToEdit={selectedPet} onSave={handleSavePet} onClose={() => setIsPetModalOpen(false)} /></Modal>
-            {selectedPet && (<Modal isOpen={isHealthModalOpen} onClose={() => setIsHealthModalOpen(false)}><HealthControlForm pet={selectedPet} onSave={handleSavePet} onClose={() => setIsHealthModalOpen(false)} depleteStockByName={depleteStockByName} /></Modal>)}
-            {selectedPet && (<Modal isOpen={isClinicalRecordModalOpen} onClose={() => setIsClinicalRecordModalOpen(false)} size="4xl"><ClinicalRecordModal pet={selectedPet} userId={userId} onClose={() => setIsClinicalRecordModalOpen(false)} /></Modal>)}
-        </>
-    );
-}
+            const setupRecordModal = (type, record = null) => {
+                recordForm.reset();
+                const productSelect = document.getElementById('product-select');
+                const otherProductContainer = document.getElementById('other-product-container');
+                
+                document.getElementById('record-id').value = record ? record.id : '';
+                document.getElementById('record-type').value = type;
+                document.getElementById('record-modal-title').textContent = `${record ? 'Editar' : 'Registrar'} ${type}`;
+                
+                const category = type === 'Vacina' ? 'Vacinas' : (type === 'Controle Parasitário' ? 'Controle Parasitário' : 'Medicamentos');
+                const availableProducts = allStockProducts.filter(p => p.categoria === category);
+                
+                productSelect.innerHTML = '<option value="">Selecione um produto</option>' + availableProducts.map(p => `<option value="${p.nomeProduto}">${p.nomeProduto}</option>`).join('') + '<option value="Outros">Outros</option>';
+
+                otherProductContainer.classList.add('hidden');
+                document.getElementById('other-product-name').value = '';
+
+                if (record) {
+                    const isProductInList = availableProducts.some(p => p.nomeProduto === record.nomeProduto);
+                    if (isProductInList) {
+                        productSelect.value = record.nomeProduto;
+                    } else {
+                        productSelect.value = 'Outros';
+                        otherProductContainer.classList.remove('hidden');
+                        document.getElementById('other-product-name').value = record.nomeProduto;
+                    }
+                    document.getElementById('application-date').value = new Date(record.dataAplicacao.toMillis()).toISOString().split('T')[0];
+                    document.getElementById('applied-elsewhere').checked = record.aplicadoExternamente || false;
+                } else {
+                    document.getElementById('application-date').valueAsDate = new Date();
+                }
+                openModal(recordModal);
+            };
+
+             const setupConsultationModal = (consultation = null) => {
+                consultationForm.reset();
+                const proceduresContainer = document.getElementById('consultation-procedures-container');
+                proceduresContainer.innerHTML = ''; 
+
+                document.getElementById('consultation-id').value = consultation ? consultation.id : '';
+                document.getElementById('consultation-modal-title').textContent = `${consultation ? 'Editar' : 'Nova'} Consulta`;
+                const pet = allPets.find(p => p.id === currentPetId);
+
+                if (consultation) {
+                    document.getElementById('consultation-date').value = new Date(consultation.dataConsulta.toMillis()).toISOString().split('T')[0];
+                    document.getElementById('consultation-weight').value = consultation.peso || '';
+                    document.getElementById('consultation-complaint').value = consultation.queixaPrincipal || '';
+                    document.getElementById('consultation-exam').value = consultation.exameFisico || '';
+                    document.getElementById('consultation-diagnosis').value = consultation.diagnostico || '';
+                    document.getElementById('consultation-treatment').value = consultation.tratamento || '';
+                    document.getElementById('consultation-followup').value = consultation.dataRetorno ? new Date(consultation.dataRetorno.toMillis()).toISOString().split('T')[0] : '';
+                    
+                    if (consultation.procedimentos && consultation.procedimentos.length > 0) {
+                        consultation.procedimentos.forEach(proc => addProcedureRow(proc));
+                    }
+                } else {
+                    document.getElementById('consultation-date').valueAsDate = new Date();
+                    document.getElementById('consultation-weight').value = pet.peso || '';
+                }
+
+                document.getElementById('add-procedure-row-btn').onclick = () => addProcedureRow(); 
+                openModal(consultationModal);
+            };
+
+             const addProcedureRow = (procedureData = null) => {
+                const container = document.getElementById('consultation-procedures-container');
+                const procedureId = `proc_${Date.now()}`;
+                const procedureRow = document.createElement('div');
+                procedureRow.className = 'grid grid-cols-5 gap-2 items-center';
+                procedureRow.id = procedureId;
+
+                const allProducts = allStockProducts;
+
+                procedureRow.innerHTML = `
+                    <select class="col-span-2 border p-2 rounded procedure-product">
+                        <option value="">Selecione um produto...</option>
+                        ${allProducts.map(p => `<option value="${p.id}" ${procedureData && procedureData.productId === p.id ? 'selected' : ''}>${p.nomeProduto} (${p.categoria})</option>`).join('')}
+                    </select>
+                    <input type="number" class="border p-2 rounded procedure-quantity" value="${procedureData ? procedureData.quantidade : 1}" min="1">
+                    <div class="flex items-center">
+                        <input type="checkbox" id="proc-applied-elsewhere-${procedureId}" class="h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 procedure-external" ${procedureData && procedureData.aplicadoExternamente ? 'checked' : ''}>
+                        <label for="proc-applied-elsewhere-${procedureId}" class="ml-2 text-xs text-gray-700">Externo</label>
+                    </div>
+                    <button type="button" class="remove-procedure-row-btn text-red-500 hover:text-red-700 justify-self-center"><i class="fas fa-trash-alt"></i></button>
+                `;
+                container.appendChild(procedureRow);
+                procedureRow.querySelector('.remove-procedure-row-btn').onclick = () => {
+                    container.removeChild(procedureRow);
+                };
+            };
+
+            // --- RENDERIZAÇÃO DAS ABAS ---
+            const renderDashboard = (records) => {
+                const today = new Date(); today.setHours(0,0,0,0);
+                const thirtyDays = new Date(); thirtyDays.setDate(today.getDate() + 30);
+                const vaccineRecords = records.filter(r => r.tipoEvento === 'Vacina');
+                const parasiteRecords = records.filter(r => r.tipoEvento === 'Controle Parasitário');
+                const overdueVaccines = vaccineRecords.filter(r => r.proximaData.toDate() < today);
+                const upcomingVaccines = vaccineRecords.filter(r => r.proximaData.toDate() >= today && r.proximaData.toDate() <= thirtyDays);
+                const upcomingParasiteControl = parasiteRecords.filter(r => r.proximaData.toDate() >= today);
+                const nextParasiteControlByPet = {};
+                upcomingParasiteControl.forEach(rec => { if (!nextParasiteControlByPet[rec.petId] || rec.proximaData.toMillis() < nextParasiteControlByPet[rec.petId].proximaData.toMillis()) { nextParasiteControlByPet[rec.petId] = rec; } });
+                const nextParasiteControls = Object.values(nextParasiteControlByPet).sort((a,b) => a.proximaData.toMillis() - b.proximaData.toMillis());
+                const renderAlertItem = (rec) => { const pet = allPets.find(p=>p.id===rec.petId); if(!pet) return ''; const { compliant } = checkDaycareCompliance(pet, allRecords); const bgColor = pet.isDaycare && !compliant ? 'bg-orange-200' : 'bg-purple-100'; return `<div class="alert-item text-sm p-2 ${bgColor} rounded mb-1 cursor-pointer hover:bg-opacity-80" data-pet-id="${pet.id}"><strong>${pet.nome}</strong> (Tutor: ${pet.nomeTutor})<br><span class="text-xs">${rec.nomeProduto} - Vence em: ${rec.proximaData.toDate().toLocaleDateString('pt-BR')}</span></div>`; };
+                const overdueHtml = overdueVaccines.map(renderAlertItem).join('');
+                const upcomingHtml = upcomingVaccines.map(renderAlertItem).join('');
+                const parasiteHtml = nextParasiteControls.map(renderAlertItem).join('');
+                document.getElementById('dashboard-tab').innerHTML = `<section id="alerts-section"><h2 class="text-2xl font-semibold text-gray-800 mb-4 text-center">Alertas Preventivos</h2><div class="grid grid-cols-1 md:grid-cols-3 gap-6"><div class="bg-teal-50 p-6 rounded-lg shadow"><h3 class="font-bold text-lg text-red-600 mb-3">Vacinas Vencidas</h3><div>${overdueHtml || '<p class="text-gray-500">Nenhuma vacina vencida.</p>'}</div></div><div class="bg-teal-50 p-6 rounded-lg shadow"><h3 class="font-bold text-lg text-orange-500 mb-3">Vacinas (Próx. 30 Dias)</h3><div>${upcomingHtml || '<p class="text-gray-500">Nenhuma vacina próxima.</p>'}</div></div><div class="bg-teal-50 p-6 rounded-lg shadow"><h3 class="font-bold text-lg text-teal-700 mb-3">Próximo Controle Parasitário</h3><div>${parasiteHtml || '<p class="text-gray-500">Nenhum controle próximo.</p>'}</div></div></div></section>`;
+                document.querySelectorAll('.alert-item').forEach(item => { item.addEventListener('click', () => showPetDetailsView(item.dataset.petId)); });
+            };
+            
+            const renderPetsTab = (pets) => {
+                const content = `<section id="pets-management"><div class="bg-teal-50 p-6 rounded-lg shadow"><div class="relative text-center mb-4"><h2 class="text-2xl font-semibold text-gray-800">Pets Cadastrados</h2><div class="absolute top-0 right-0"><button id="add-pet-button-main" class="bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 whitespace-nowrap">+ Novo Pet</button></div></div><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-purple-200 text-purple-800"><th class="p-3">Nome</th><th class="p-3">Tutor</th><th class="p-3">Contato</th><th class="p-3 text-right">Ações</th></tr></thead><tbody id="pets-list-body">${pets.map(pet => { const { compliant } = checkDaycareCompliance(pet, allRecords); const rowClass = pet.isDaycare && !compliant ? 'bg-orange-200 hover:bg-orange-300' : 'bg-teal-100 hover:bg-teal-200'; const daycareIcon = pet.isDaycare ? `<i class="fas fa-home text-purple-600 ml-2" title="Pet de Creche/Hotel"></i>` : ''; return `<tr class="${rowClass} cursor-pointer border-b border-purple-200" data-pet-id="${pet.id}"><td class="p-3">${pet.nome} ${daycareIcon}</td><td class="p-3">${pet.nomeTutor}</td><td class="p-3">${pet.contatoTutor}</td><td class="p-3 text-right"><button class="edit-pet-btn text-purple-500 hover:text-purple-700 ml-2" data-pet-id="${pet.id}"><i class="fas fa-pen"></i></button><button class="delete-pet-btn text-orange-500 hover:text-orange-700 ml-2" data-pet-id="${pet.id}"><i class="fas fa-trash"></i></button></td></tr>`}).join('')}</tbody></table></div></div></section>`;
+                document.getElementById('pets-tab').innerHTML = content;
+                attachPetActionListeners();
+            };
+
+            const renderReportsTab = (container, records, type) => {
+                const title = type === 'Vacina' ? 'Relatório Geral de Vacinas' : 'Relatório Geral de Controle Parasitário'; const header = type === 'Vacina' ? 'Procedimentos' : 'Produtos'; const recordsOfType = records.filter(r => r.tipoEvento === type);
+                const groupedByPet = recordsOfType.reduce((acc, record) => { if (!acc[record.petId]) { acc[record.petId] = []; } acc[record.petId].push(record); return acc; }, {});
+                const tableBody = Object.keys(groupedByPet).map(petId => { const petRecords = groupedByPet[petId]; const pet = allPets.find(p => p.id === petId); if (!pet) return ''; const productNames = petRecords.map(r => r.nomeProduto).join(', '); const lastApplication = new Date(Math.max(...petRecords.map(r => r.dataAplicacao.toMillis()))); const nextDueDate = new Date(Math.min(...petRecords.map(r => r.proximaData.toMillis()))); const { compliant } = checkDaycareCompliance(pet, allRecords); const rowClass = pet.isDaycare && !compliant ? 'bg-orange-200 hover:bg-orange-300' : 'bg-teal-100 hover:bg-teal-200'; return `<tr class="${rowClass} cursor-pointer border-b border-purple-200" data-pet-id="${pet.id}"><td class="p-3">${pet.nome}</td><td class="p-3">${productNames}</td><td class="p-3">${lastApplication.toLocaleDateString('pt-BR')}</td><td class="p-3">${nextDueDate.toLocaleDateString('pt-BR')}</td></tr>`; }).join('');
+                const content = `<div class="bg-teal-50 p-6 rounded-lg shadow"><h2 class="text-2xl font-semibold text-gray-800 mb-4 text-center">${title}</h2><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-purple-200 text-purple-800"><th class="p-3">Pet</th><th class="p-3">${header}</th><th class="p-3">Última Aplicação</th><th class="p-3">Próxima Dose Mais Perto</th></tr></thead><tbody>${Object.keys(groupedByPet).length > 0 ? tableBody : `<tr><td colspan="4" class="p-3 text-center text-gray-500">Nenhum registro encontrado.</td></tr>`}</tbody></table></div></div>`;
+                container.innerHTML = content;
+                container.querySelectorAll('tr[data-pet-id]').forEach(row => { row.addEventListener('click', () => showPetDetailsView(row.dataset.petId)); });
+            };
+
+            const renderHealthHistoryForPet = (petId) => {
+                const historyContainer = document.getElementById('health-history-list-body'); if (!historyContainer) return;
+                const records = allRecords.filter(r => r.petId === petId).sort((a,b) => b.dataAplicacao.toMillis() - a.dataAplicacao.toMillis());
+                historyContainer.innerHTML = records.map(record => { const proximaData = record.proximaData.toDate(); const today = new Date(); today.setHours(0,0,0,0); let statusClass = 'bg-green-100 text-green-800', statusText = 'OK'; if (proximaData < today) { statusClass = 'bg-red-100 text-red-800'; statusText = 'Vencido'; } else if ((proximaData - today) / (1000*60*60*24) <= 30) { statusClass = 'bg-orange-100 text-orange-800'; statusText = 'Pendente'; } return `<tr class="bg-teal-100 border-b border-purple-200"><td class="p-3">${record.dataAplicacao.toDate().toLocaleDateString('pt-BR')}</td><td class="p-3">${record.tipoEvento}</td><td class="p-3">${record.nomeProduto}</td><td class="p-3">${proximaData.toLocaleDateString('pt-BR')}</td><td class="p-3"><span class="px-2 py-1 rounded-full text-sm font-semibold ${statusClass}">${statusText}</span></td><td class="p-3 text-right"><button class="edit-record-btn text-purple-500 hover:text-purple-700 ml-2" data-record-id="${record.id}" data-record-type="${record.tipoEvento}"><i class="fas fa-pen"></i></button><button class="delete-record-btn text-orange-500 hover:text-orange-700 ml-2" data-record-id="${record.id}"><i class="fas fa-trash"></i></button></td></tr>`;}).join('');
+                document.querySelectorAll('.edit-record-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); const record = allRecords.find(r=>r.id===btn.dataset.recordId); setupRecordModal(btn.dataset.recordType, record); }));
+                document.querySelectorAll('.delete-record-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); const recordId = btn.dataset.recordId; const record = allRecords.find(r=>r.id===recordId); const recordName = record ? record.nomeProduto : 'este registro'; openConfirmModal(`Deseja excluir o registro de ${recordName}?`, () => { deleteDoc(doc(db, 'registrosSaude', recordId)); showToast('Registro excluído.'); }); }));
+            };
+
+            const renderConsultationsForPet = (petId) => {
+                const historyContainer = document.getElementById('consultations-history-list-body'); if (!historyContainer) return;
+                const petConsultations = allConsultations.filter(c => c.petId === petId).sort((a,b) => b.dataConsulta.toMillis() - a.dataConsulta.toMillis());
+                historyContainer.innerHTML = petConsultations.map(consult => { const retornoDate = consult.dataRetorno ? consult.dataRetorno.toDate().toLocaleDateString('pt-BR') : 'N/A'; return `<tr class="bg-blue-100 border-b border-blue-200"><td class="p-3">${consult.dataConsulta.toDate().toLocaleDateString('pt-BR')}</td><td class="p-3 truncate" title="${consult.queixaPrincipal}">${consult.queixaPrincipal}</td><td class="p-3 truncate" title="${consult.diagnostico}">${consult.diagnostico || 'N/A'}</td><td class="p-3">${retornoDate}</td><td class="p-3 text-right"><button class="view-consultation-btn text-blue-500 hover:text-blue-700 ml-2" data-consult-id="${consult.id}"><i class="fas fa-eye"></i></button><button class="edit-consultation-btn text-purple-500 hover:text-purple-700 ml-2" data-consult-id="${consult.id}"><i class="fas fa-pen"></i></button><button class="delete-consultation-btn text-orange-500 hover:text-orange-700 ml-2" data-consult-id="${consult.id}"><i class="fas fa-trash"></i></button></td></tr>`; }).join('');
+                document.querySelectorAll('.view-consultation-btn, .edit-consultation-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); const consult = allConsultations.find(c=>c.id===btn.dataset.consultId); setupConsultationModal(consult); }));
+                document.querySelectorAll('.delete-consultation-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); const consultId = btn.dataset.consultId; openConfirmModal(`Deseja excluir esta consulta?`, () => { deleteDoc(doc(db, 'consultas', consultId)); showToast('Consulta excluída.'); }); }));
+            };
+
+            const showPetDetailsView = (petId) => {
+                currentPetId = petId;
+                mainContent.querySelector('#tab-contents').classList.add('hidden');
+                mainContent.querySelector('#filters-container').classList.add('hidden');
+                petDetailsView.classList.remove('hidden');
+                const pet = allPets.find(p => p.id === petId);
+                if (!pet) { console.error("Pet não encontrado:", petId); petDetailsView.classList.add('hidden'); mainContent.querySelector('#tab-contents').classList.remove('hidden'); mainContent.querySelector('#filters-container').classList.remove('hidden'); return; }
+                const birthDate = pet.dataNascimento.toDate().toLocaleDateString('pt-BR');
+                const { compliant } = checkDaycareCompliance(pet, allRecords);
+                let complianceBanner = pet.isDaycare ? (compliant ? `<div class="p-3 mb-4 bg-green-100 text-green-800 rounded-lg text-center font-semibold">Este pet está com a saúde em dia para Creche/Hotel.</div>` : `<div class="p-3 mb-4 bg-orange-200 text-orange-800 rounded-lg text-center font-semibold">Atenção: Saúde irregular para Creche/Hotel!</div>`) : '';
+                petDetailsView.innerHTML = `${complianceBanner}<button id="back-to-list" class="bg-gray-500 text-white px-4 py-2 rounded-lg hover:bg-gray-600 mb-4">&larr; Voltar</button><div class="bg-teal-50 p-6 rounded-lg shadow"><div class="mb-6 border-b border-purple-200 pb-4 grid grid-cols-1 md:grid-cols-3 gap-2"><div><h2 class="text-2xl font-bold">${pet.nome}</h2><p>${pet.especie} - ${pet.raca}</p></div><div><p>Nascimento: ${birthDate}</p><p>Cor: ${pet.corPelagem || 'N/A'}</p><p>Peso: ${pet.peso ? pet.peso + ' kg' : 'N/A'}</p></div><div><p class="font-semibold">Tutor: ${pet.nomeTutor}</p><p>${pet.contatoTutor}</p></div></div><div class="mb-8"><div class="flex justify-between items-center mb-4"><h3 class="text-xl font-semibold text-gray-700">Histórico de Saúde</h3><div><button id="add-vaccine-btn-detail" class="bg-teal-500 text-white px-4 py-2 rounded-lg hover:bg-teal-600 mr-2">+ Vacina</button><button id="add-parasite-btn-detail" class="bg-purple-500 text-white px-4 py-2 rounded-lg hover:bg-purple-600 mr-2">+ Parasitário</button><button id="add-medication-btn-detail" class="bg-indigo-500 text-white px-4 py-2 rounded-lg hover:bg-indigo-600">+ Medicamento</button></div></div><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-purple-200 text-purple-800"><th class="p-3">Data</th><th class="p-3">Procedimento</th><th class="p-3">Produto</th><th class="p-3">Próxima Dose</th><th class="p-3">Status</th><th class="p-3 text-right">Ações</th></tr></thead><tbody id="health-history-list-body"></tbody></table></div></div><div><div class="flex justify-between items-center mb-4"><h3 class="text-xl font-semibold text-gray-700">Histórico de Consultas</h3><div><button id="add-consultation-btn-detail" class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600">+ Nova Consulta</button></div></div><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-blue-200 text-blue-800"><th class="p-3">Data</th><th class="p-3">Queixa Principal</th><th class="p-3">Diagnóstico</th><th class="p-3">Retorno</th><th class="p-3 text-right">Ações</th></tr></thead><tbody id="consultations-history-list-body"></tbody></table></div></div></div>`;
+                document.getElementById('back-to-list').addEventListener('click', () => { petDetailsView.classList.add('hidden'); mainContent.querySelector('#tab-contents').classList.remove('hidden'); mainContent.querySelector('#filters-container').classList.remove('hidden'); currentPetId = null; });
+                document.getElementById('add-vaccine-btn-detail').addEventListener('click', () => setupRecordModal('Vacina'));
+                document.getElementById('add-parasite-btn-detail').addEventListener('click', () => setupRecordModal('Controle Parasitário'));
+                document.getElementById('add-medication-btn-detail').addEventListener('click', () => setupRecordModal('Medicamento'));
+                document.getElementById('add-consultation-btn-detail').addEventListener('click', () => setupConsultationModal());
+                renderHealthHistoryForPet(petId);
+                renderConsultationsForPet(petId);
+            };
+
+            // --- FUNÇÃO CENTRAL DE RENDERIZAÇÃO ---
+            const applyFiltersAndRender = () => {
+                const searchTerm = universalSearch.value.toLowerCase();
+                const startDate = startDateFilter.value ? new Date(startDateFilter.value) : null;
+                const endDate = endDateFilter.value ? new Date(endDateFilter.value) : null;
+                if(startDate) startDate.setHours(0,0,0,0);
+                if(endDate) endDate.setHours(23,59,59,999);
+                const filteredPetIds = allPets.filter(pet => (pet.nome || '').toLowerCase().includes(searchTerm) || (pet.nomeTutor || '').toLowerCase().includes(searchTerm)).map(pet => pet.id);
+                const filteredPets = allPets.filter(pet => filteredPetIds.includes(pet.id));
+                let filteredRecords = allRecords.filter(rec => filteredPetIds.includes(rec.petId));
+                if (['vaccines', 'parasite-control'].includes(activeTab)) { if (startDate) filteredRecords = filteredRecords.filter(rec => rec.proximaData.toDate() >= startDate); if (endDate) filteredRecords = filteredRecords.filter(rec => rec.proximaData.toDate() <= endDate); }
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
+                const activeTabContent = document.getElementById(`${activeTab}-tab`);
+                if(activeTabContent) activeTabContent.classList.remove('hidden');
+                switch (activeTab) { case 'dashboard': renderDashboard(filteredRecords); break; case 'pets': renderPetsTab(filteredPets); break; case 'stock': renderStockTab(); break; case 'vaccines': renderReportsTab(activeTabContent, filteredRecords, 'Vacina'); break; case 'parasite-control': renderReportsTab(activeTabContent, filteredRecords, 'Controle Parasitário'); break; }
+            };
+
+            // --- LÓGICA DE NAVEGAÇÃO E FILTROS ---
+            document.querySelectorAll('.tab-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    activeTab = button.dataset.tab;
+                    mainContent.querySelector('#tab-contents').classList.remove('hidden');
+                    petDetailsView.classList.add('hidden');
+                    document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+                    button.classList.add('active');
+                    document.getElementById('date-filters').classList.toggle('hidden', !['vaccines', 'parasite-control'].includes(activeTab));
+                    universalSearch.value = '';
+                    applyFiltersAndRender();
+                });
+            });
+            [universalSearch, startDateFilter, endDateFilter].forEach(el => el.addEventListener('input', applyFiltersAndRender));
+            clearFiltersButton.addEventListener('click', () => { startDateFilter.value = ''; endDateFilter.value = ''; applyFiltersAndRender(); });
+
+            // --- LISTENERS DO FIRESTORE ---
+            unsubscribeListeners.push(onSnapshot(collection(db, "pets"), s => { allPets = s.docs.map(d=>({id:d.id, ...d.data()})); if(currentPetId) showPetDetailsView(currentPetId); else applyFiltersAndRender(); }));
+            unsubscribeListeners.push(onSnapshot(collection(db, "registrosSaude"), s => { allRecords = s.docs.map(d=>({id:d.id, ...d.data()})); if(currentPetId) showPetDetailsView(currentPetId); else applyFiltersAndRender(); }));
+            unsubscribeListeners.push(onSnapshot(collection(db, "consultas"), s => { allConsultations = s.docs.map(d=>({id:d.id, ...d.data()})); if(currentPetId) showPetDetailsView(currentPetId); }));
+            unsubscribeListeners.push(onSnapshot(collection(db, "produtosEstoque"), s => { allStockProducts = s.docs.map(d=>({id:d.id, ...d.data()})); applyFiltersAndRender(); }));
+            unsubscribeListeners.push(onSnapshot(collection(db, "lotesEstoque"), s => { allStockLots = s.docs.map(d=>({id:d.id, ...d.data()})); applyFiltersAndRender(); }));
+
+            // --- MÓDULO DE ESTOQUE ---
+            const renderStockTab = () => {
+                const stockTabContent = document.getElementById('stock-tab');
+                const searchTerm = universalSearch.value.toLowerCase();
+                let filteredProducts = allStockProducts.filter(p => {
+                    const categoryMatch = stockCategoryFilter === 'Todos' || p.categoria === stockCategoryFilter;
+                    const searchMatch = (p.nomeProduto || '').toLowerCase().includes(searchTerm);
+                    return categoryMatch && searchMatch;
+                });
+                stockTabContent.innerHTML = `<div class="bg-teal-50 p-6 rounded-lg shadow"><div class="flex flex-col md:flex-row justify-between items-center mb-4"><h2 class="text-2xl font-semibold text-gray-800">Catálogo de Estoque</h2><div class="flex items-center gap-2 mt-4 md:mt-0"><div id="stock-category-filters" class="flex flex-wrap space-x-2"><button data-category="Todos" class="stock-filter-btn px-3 py-1 text-sm rounded-md ${stockCategoryFilter === 'Todos' ? 'bg-purple-600 text-white' : 'bg-purple-200'}">Todos</button><button data-category="Vacinas" class="stock-filter-btn px-3 py-1 text-sm rounded-md ${stockCategoryFilter === 'Vacinas' ? 'bg-purple-600 text-white' : 'bg-purple-200'}">Vacinas</button><button data-category="Controle Parasitário" class="stock-filter-btn px-3 py-1 text-sm rounded-md ${stockCategoryFilter === 'Controle Parasitário' ? 'bg-purple-600 text-white' : 'bg-purple-200'}">Parasitário</button><button data-category="Medicamentos" class="stock-filter-btn px-3 py-1 text-sm rounded-md ${stockCategoryFilter === 'Medicamentos' ? 'bg-purple-600 text-white' : 'bg-purple-200'}">Medicamentos</button><button data-category="Descartáveis" class="stock-filter-btn px-3 py-1 text-sm rounded-md ${stockCategoryFilter === 'Descartáveis' ? 'bg-purple-600 text-white' : 'bg-purple-200'}">Descartáveis</button></div><button id="add-product-catalog-btn" class="bg-green-500 text-white px-3 py-1 rounded-md text-sm hover:bg-green-600">+ Novo Produto</button></div></div><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-purple-200 text-purple-800"><th class="p-3">Produto</th><th class="p-3">Categoria</th><th class="p-3">Qtd. Total</th><th class="p-3">Estoque Mínimo</th><th class="p-3">Status</th><th class="p-3 text-right">Ações</th></tr></thead><tbody>${filteredProducts.map(p => { 
+                    const lots = allStockLots.filter(l => l.produtoId === p.id);
+                    const totalStock = lots.reduce((sum, l) => sum + l.quantidadeAtual, 0);
+                    const lotsTooltip = lots.map(l => `${l.quantidadeAtual} (Val: ${l.dataValidade.toDate().toLocaleDateString('pt-BR')})`).join(' | ');
+                    let statusClass = 'bg-green-200 text-green-800'; let statusText = 'OK'; 
+                    if (totalStock <= 0) { statusClass = 'bg-red-200 text-red-800'; statusText = 'Zerado'; } 
+                    else if (totalStock <= p.estoqueMinimoAlerta) { statusClass = 'bg-yellow-200 text-yellow-800'; statusText = 'Baixo'; } 
+                    return `<tr class="hover:bg-teal-200 border-b border-purple-200"><td class="p-3 font-medium stock-item-row cursor-pointer" data-product-id="${p.id}">${p.nomeProduto}</td><td class="p-3 stock-item-row cursor-pointer" data-product-id="${p.id}">${p.categoria}</td><td class="p-3 stock-item-row cursor-pointer" data-product-id="${p.id}" title="${lotsTooltip}">${totalStock} ${p.unidade || ''}</td><td class="p-3 stock-item-row cursor-pointer" data-product-id="${p.id}">${p.estoqueMinimoAlerta}</td><td class="p-3 stock-item-row cursor-pointer" data-product-id="${p.id}"><span class="px-2 py-1 rounded-full text-xs font-semibold ${statusClass}">${statusText}</span></td><td class="p-3 text-right"><button title="Baixa Manual de Estoque" class="manual-deduct-btn text-orange-500 hover:text-orange-700 mr-2" data-product-id="${p.id}"><i class="fas fa-arrow-down-wide-short"></i></button><button title="Editar Produto" class="edit-product-catalog-btn text-purple-600 hover:text-purple-800 mr-2" data-product-id="${p.id}"><i class="fas fa-pen-to-square"></i></button><button title="Excluir Produto" class="delete-product-btn text-red-500 hover:text-red-700" data-product-id="${p.id}"><i class="fas fa-trash"></i></button></td></tr>`}).join('') || `<tr><td colspan="6" class="p-4 text-center">Nenhum produto encontrado.</td></tr>`}</tbody></table></div></div>`;
+                document.querySelectorAll('.stock-filter-btn').forEach(btn => btn.addEventListener('click', () => { stockCategoryFilter = btn.dataset.category; renderStockTab(); }));
+                document.querySelectorAll('.stock-item-row').forEach(row => row.addEventListener('click', () => openStockDetailsModal(row.dataset.productId)));
+                document.getElementById('add-product-catalog-btn').addEventListener('click', () => openProductCatalogModal());
+                document.querySelectorAll('.edit-product-catalog-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); openProductCatalogModal(btn.dataset.productId); }));
+                document.querySelectorAll('.manual-deduct-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); openManualDeductionModal(btn.dataset.productId); }));
+                document.querySelectorAll('.delete-product-btn').forEach(btn => btn.addEventListener('click', (e) => { e.stopPropagation(); deleteProductHandler(btn.dataset.productId); }));
+            };
+            const openProductCatalogModal = (productId = null) => {
+                productCatalogForm.reset();
+                const title = document.getElementById('product-catalog-modal-title');
+                if (productId) {
+                    title.textContent = "Editar Produto no Catálogo";
+                    const product = allStockProducts.find(p => p.id === productId);
+                    document.getElementById('product-catalog-id').value = product.id;
+                    document.getElementById('product-catalog-name').value = product.nomeProduto;
+                    document.getElementById('product-catalog-category').value = product.categoria;
+                    document.getElementById('product-catalog-unit').value = product.unidade;
+                    document.getElementById('product-catalog-min-stock').value = product.estoqueMinimoAlerta;
+                } else {
+                    title.textContent = "Adicionar Novo Produto ao Catálogo";
+                    document.getElementById('product-catalog-id').value = '';
+                }
+                openModal(productCatalogModal);
+            };
+            const openStockDetailsModal = (productId) => { const product = allStockProducts.find(p => p.id === productId); const lots = allStockLots.filter(l => l.produtoId === productId).sort((a,b) => a.dataValidade.toMillis() - b.dataValidade.toMillis()); const modalTitle = document.getElementById('stock-details-modal-title'); const modalContent = document.getElementById('stock-details-content'); modalTitle.textContent = `Detalhes de: ${product.nomeProduto}`; modalContent.innerHTML = `<div class="flex justify-end mb-4"><button id="add-lote-btn" data-product-id="${productId}" class="bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600">+ Adicionar Lote</button></div><h3 class="font-semibold mb-2">Lotes Disponíveis:</h3><div class="overflow-x-auto"><table class="w-full text-left"><thead><tr class="bg-gray-200"><th class="p-2">Qtd. no Lote</th><th class="p-2">Data de Validade</th><th class="p-2">Data de Entrada</th><th class="p-2 text-right">Ações</th></tr></thead><tbody>${lots.map(l => `<tr class="border-b"><td class="p-2">${l.quantidadeAtual}</td><td class="p-2">${l.dataValidade.toDate().toLocaleDateString('pt-BR')}</td><td class="p-2">${l.dataEntrada.toDate().toLocaleDateString('pt-BR')}</td><td class="p-2 text-right"><button title="Ajuste de Estoque (Baixa)" class="adjust-lote-btn text-orange-500 hover:text-orange-700" data-lote-id="${l.id}"><i class="fas fa-minus-circle"></i></button></td></tr>`).join('') || `<tr><td colspan="4" class="p-2 text-center">Nenhum lote cadastrado.</td></tr>`}</tbody></table></div>`; document.getElementById('add-lote-btn').addEventListener('click', (e) => { const prodId = e.target.dataset.productId; document.getElementById('lote-entry-product-id').value = prodId; openModal(document.getElementById('lote-entry-modal')); }); document.querySelectorAll('.adjust-lote-btn').forEach(btn => {btn.addEventListener('click', () => openStockAdjustmentModal(btn.dataset.loteId)); }); openModal(document.getElementById('stock-details-modal')); };
+            const openStockAdjustmentModal = (loteId) => { const lote = allStockLots.find(l => l.id === loteId); if(!lote) { showToast("Lote não encontrado!", "error"); return; } stockAdjustmentForm.reset(); document.getElementById('adjustment-lote-id').value = loteId; document.getElementById('adjustment-product-name').textContent = lote.nomeProduto; document.getElementById('adjustment-current-stock').textContent = lote.quantidadeAtual; document.getElementById('adjustment-quantity').max = lote.quantidadeAtual; openModal(stockAdjustmentModal); };
+            const openManualDeductionModal = (productId) => { manualDeductionForm.reset(); const product = allStockProducts.find(p => p.id === productId); document.getElementById('deduction-product-id').value = productId; document.getElementById('deduction-product-name').textContent = product.nomeProduto; openModal(manualDeductionModal); };
+            const deductFromStockFEFO = async (product, quantityToDeduct) => { if (!product || !product.id) { showToast(`Produto inválido.`, 'error'); return false; } try { await runTransaction(db, async (transaction) => { const lotesQuery = query(collection(db, 'lotesEstoque'), where('produtoId', '==', product.id), where('quantidadeAtual', '>', 0)); const lotesSnap = await getDocs(lotesQuery); const sortedLotes = lotesSnap.docs.map(d => ({...d.data(), id: d.id})).sort((a,b) => a.dataValidade.toMillis() - b.dataValidade.toMillis()); let totalStock = sortedLotes.reduce((sum, lote) => sum + lote.quantidadeAtual, 0); if (totalStock < quantityToDeduct) { throw new Error(`Estoque insuficiente para "${product.nomeProduto}".`); } let remainingToDeduct = quantityToDeduct; for (const lote of sortedLotes) { if (remainingToDeduct <= 0) break; const loteRef = doc(db, 'lotesEstoque', lote.id); const currentLote = (await transaction.get(loteRef)).data(); const quantityInLote = currentLote.quantidadeAtual; const deduction = Math.min(remainingToDeduct, quantityInLote); transaction.update(loteRef, { quantidadeAtual: quantityInLote - deduction }); remainingToDeduct -= deduction; } }); showToast(`Baixa de estoque para "${product.nomeProduto}" realizada.`, 'success'); return true; } catch (e) { console.error("Falha na baixa de estoque:", e); showToast(e.message, 'error'); return false; } };
+            const deleteProductHandler = (productId) => { const product = allStockProducts.find(p => p.id === productId); if (!product) return; openConfirmModal(`Tem a certeza que quer excluir o produto "${product.nomeProduto}" e todos os seus lotes? Esta ação não pode ser desfeita.`, () => deleteProductAndLots(productId)); };
+            const deleteProductAndLots = async (productId) => { const batch = writeBatch(db); const lotsQuery = query(collection(db, 'lotesEstoque'), where('produtoId', '==', productId)); const lotsSnap = await getDocs(lotsQuery); lotsSnap.forEach(loteDoc => batch.delete(loteDoc.ref)); batch.delete(doc(db, 'produtosEstoque', productId)); await batch.commit(); showToast("Produto e lotes associados foram excluídos.", "success"); };
+            
+            // --- LISTENERS DE FORMULÁRIOS ---
+            petForm.addEventListener('submit', async (e) => { e.preventDefault(); const petId = document.getElementById('pet-id').value; const petData = { nome: document.getElementById('pet-name').value, especie: document.getElementById('pet-species').value, raca: document.getElementById('pet-breed').value, corPelagem: document.getElementById('pet-color').value, peso: parseFloat(document.getElementById('pet-weight').value) || null, dataNascimento: Timestamp.fromDate(new Date(document.getElementById('pet-birthdate').value)), nomeTutor: document.getElementById('tutor-name').value, contatoTutor: document.getElementById('tutor-contact').value, isDaycare: document.getElementById('pet-daycare').checked }; try { if (petId) { await updateDoc(doc(db, 'pets', petId), petData); showToast('Pet atualizado com sucesso!'); } else { await addDoc(collection(db, 'pets'), petData); showToast('Pet adicionado com sucesso!'); } closeModal(petModal); } catch (error) { console.error("Erro ao salvar pet:", error); showToast('Erro ao salvar pet.', 'error'); } });
+            consultationForm.addEventListener('submit', async (e) => { e.preventDefault(); const consultId = document.getElementById('consultation-id').value; const newWeight = parseFloat(document.getElementById('consultation-weight').value); const consultData = { petId: currentPetId, dataConsulta: Timestamp.fromDate(new Date(document.getElementById('consultation-date').value)), peso: newWeight, queixaPrincipal: document.getElementById('consultation-complaint').value, exameFisico: document.getElementById('consultation-exam').value, diagnostico: document.getElementById('consultation-diagnosis').value, tratamento: document.getElementById('consultation-treatment').value, dataRetorno: document.getElementById('consultation-followup').value ? Timestamp.fromDate(new Date(document.getElementById('consultation-followup').value)) : null }; try { if (consultId) { await updateDoc(doc(db, 'consultas', consultId), consultData); showToast('Consulta atualizada com sucesso!'); } else { await addDoc(collection(db, 'consultas'), consultData); showToast('Consulta salva com sucesso!'); } if (newWeight) { await updateDoc(doc(db, 'pets', currentPetId), { peso: newWeight }); } closeModal(consultationModal); } catch (error) { console.error("Erro ao salvar consulta:", error); showToast('Erro ao salvar consulta.', 'error'); } });
+            productCatalogForm.addEventListener('submit', async (e) => { e.preventDefault(); const productId = document.getElementById('product-catalog-id').value; const productData = { nomeProduto: document.getElementById('product-catalog-name').value, categoria: document.getElementById('product-catalog-category').value, unidade: document.getElementById('product-catalog-unit').value, estoqueMinimoAlerta: parseInt(document.getElementById('product-catalog-min-stock').value, 10) }; try { if (productId) { await updateDoc(doc(db, 'produtosEstoque', productId), productData); showToast('Produto atualizado!'); } else { await addDoc(collection(db, 'produtosEstoque'), productData); showToast('Novo produto adicionado ao catálogo!'); } closeModal(productCatalogModal); } catch (error) { console.error("Erro ao salvar produto:", error); showToast('Erro ao salvar produto.', 'error'); }});
+            loteEntryForm.addEventListener('submit', async (e) => { e.preventDefault(); const productId = document.getElementById('lote-entry-product-id').value; const loteData = { produtoId: productId, nomeProduto: allStockProducts.find(p => p.id === productId).nomeProduto, quantidadeAtual: parseInt(document.getElementById('lote-quantity').value, 10), dataEntrada: serverTimestamp(), dataValidade: Timestamp.fromDate(new Date(document.getElementById('lote-expiry').value)) }; try { await addDoc(collection(db, 'lotesEstoque'), loteData); showToast('Lote adicionado com sucesso!', 'success'); closeModal(document.getElementById('lote-entry-modal')); } catch (error) { console.error("Erro ao salvar lote:", error); showToast('Erro ao salvar lote.', 'error'); } });
+            stockAdjustmentForm.addEventListener('submit', async (e) => { e.preventDefault(); const loteId = document.getElementById('adjustment-lote-id').value; const quantityToRemove = parseInt(document.getElementById('adjustment-quantity').value, 10); const lote = allStockLots.find(l => l.id === loteId); if (quantityToRemove > lote.quantidadeAtual) { showToast("A quantidade a remover não pode ser maior que o estoque atual do lote.", "error"); return; } const newQuantity = lote.quantidadeAtual - quantityToRemove; try { const loteRef = doc(db, 'lotesEstoque', loteId); await updateDoc(loteRef, { quantidadeAtual: newQuantity }); showToast("Baixa manual realizada com sucesso!", "success"); closeModal(stockAdjustmentModal); closeModal(document.getElementById('stock-details-modal')); } catch(error) { showToast("Erro ao ajustar o estoque.", "error"); console.error("Erro no ajuste de estoque: ", error); } });
+            manualDeductionForm.addEventListener('submit', async (e) => { e.preventDefault(); const productId = document.getElementById('deduction-product-id').value; const product = allStockProducts.find(p => p.id === productId); if (!product) { showToast("Produto não encontrado.", "error"); return; } const quantity = parseInt(document.getElementById('deduction-quantity').value, 10); await deductFromStockFEFO(product, quantity); closeModal(manualDeductionModal); });
+            
+            document.getElementById('product-select').addEventListener('change', (e) => {
+                document.getElementById('other-product-container').classList.toggle('hidden', e.target.value !== 'Outros');
+            });
+            
+            recordForm.addEventListener('submit', async (e) => { 
+                e.preventDefault(); 
+                const recordId = document.getElementById('record-id').value; 
+                const appliedElsewhere = document.getElementById('applied-elsewhere').checked; 
+                let productName = document.getElementById('product-select').value;
+                let skipStockDeduction = appliedElsewhere;
+
+                if (productName === 'Outros') {
+                    productName = document.getElementById('other-product-name').value;
+                    skipStockDeduction = true; // "Outros" sempre ignora o estoque
+                }
+                
+                if (!productName) {
+                    showToast('Por favor, selecione ou insira um produto.', 'error');
+                    return;
+                }
+                
+                const productDetails = allStockProducts.find(p => p.nomeProduto === productName);
+                const appDateVal = document.getElementById('application-date').value; 
+                const dateParts = appDateVal.split('-'); 
+                const appDate = new Date(parseInt(dateParts[0]), parseInt(dateParts[1]) - 1, parseInt(dateParts[2])); 
+                let nextDate = new Date(appDate.getTime()); 
+                nextDate.setDate(nextDate.getDate() + 365); 
+                
+                const recordData = { petId: currentPetId, tipoEvento: document.getElementById('record-type').value, nomeProduto: productName, dataAplicacao: Timestamp.fromDate(appDate), proximaData: Timestamp.fromDate(nextDate), aplicadoExternamente: skipStockDeduction }; 
+                
+                try { 
+                    if (recordId) { 
+                        await updateDoc(doc(db, 'registrosSaude', recordId), recordData); 
+                        showToast('Registro atualizado.'); 
+                    } else { 
+                        if (skipStockDeduction || !productDetails) {
+                            await addDoc(collection(db, 'registrosSaude'), recordData);
+                            showToast('Registro adicionado (sem baixa no estoque).');
+                        } else {
+                            const stockDeducted = await deductFromStockFEFO(productDetails, 1); 
+                            if (stockDeducted) { 
+                                await addDoc(collection(db, 'registrosSaude'), recordData); 
+                                showToast('Registro adicionado e estoque atualizado.'); 
+                            } else { 
+                                showToast('O registro NÃO foi salvo pois não há estoque suficiente.', 'error'); 
+                                return; 
+                            } 
+                        }
+                    } 
+                    closeModal(recordModal); 
+                } catch (error) { 
+                    console.error("Erro ao salvar registro:", error); 
+                    showToast('Erro ao salvar registro.', 'error'); 
+                } 
+            });
+        }
+    </script>
+</body>
+</html>
